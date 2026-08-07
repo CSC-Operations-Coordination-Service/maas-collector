@@ -19,12 +19,10 @@ ARG PACKAGE_VERSION
 
 WORKDIR /app
 
-# curl backs the HEALTHCHECK below; jq is carried over from the monorepo image
-# for operator use inside the container.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl jq \
-    && rm -rf /var/lib/apt/lists/*
-
+# No apt layer on purpose: the CI runner has no direct internet egress, so
+# `apt-get update` cannot reach deb.debian.org (see the HEALTHCHECK below, which
+# uses the interpreter already present in the image instead of curl).
+#
 # `pip_index_url` secret = full Nexus PyPI simple index, e.g.
 #   http://user:pass@nexus.example.com:8081/repository/pypi-prod-group/simple
 # The host is derived from the URL and declared trusted, since the Nexus index
@@ -47,8 +45,11 @@ USER appuser
 ENV HEALTHCHECK_HOSTNAME=localhost
 ENV HEALTHCHECK_PORT=8080
 
+# The health endpoint is served at "/" (health.py registers the rule "/" under
+# the *endpoint name* "healthcheck" — the path is not /healthcheck).
+# The probe reads the two variables above itself, so exec form is safe.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl --fail http://${HEALTHCHECK_HOSTNAME}:${HEALTHCHECK_PORT}/healthcheck || exit 1
+  CMD ["python", "-c", "import os,urllib.request;urllib.request.urlopen('http://%s:%s/' % (os.environ.get('HEALTHCHECK_HOSTNAME','localhost'),os.environ.get('HEALTHCHECK_PORT','8080')),timeout=5)"]
 
 # /conf holds the collector configuration, /data the files to ingest.
 VOLUME ["/conf", "/data"]
