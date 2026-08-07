@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1
+#
+# Mode 1 — "local": install the wheel produced by a local/CI build.
+# In the pipeline the wheel is handed over via actions/upload-artifact +
+# download-artifact; locally just run `tox -e build` first.
+# The `dist/` directory is expected to be present in the build context.
+#
+# maas-model is not published on public PyPI, so the runtime dependencies are
+# resolved through the Nexus PyPI index. It is passed as a BuildKit secret
+# (`mount-pip-index: true` in the caller) so a credentialed URL never lands in
+# an image layer nor in `docker history`.
+#
+ARG PYTHON_VERSION=3.11
+ARG DEBIAN_VERSION=bookworm
+
+FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION} AS runtime
+
+# Don't write .pyc files / buffer stdout (better container logs).
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# curl backs the HEALTHCHECK below; jq is carried over from the monorepo image
+# for operator use inside the container.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bring in the pre-built distribution and install it.
+#
+# `pip_index_url` secret = full Nexus PyPI simple index, e.g.
+#   http://user:pass@nexus.example.com:8081/repository/pypi-dev-group/simple
+# The group also proxies PyPI, so every dependency resolves through it. The host
+# is derived from the URL and declared trusted, since the Nexus index is served
+# over plain HTTP (pip ignores non-HTTPS indexes otherwise).
+COPY dist/ /tmp/dist/
+RUN --mount=type=secret,id=pip_index_url \
+    index_url="$(cat /run/secrets/pip_index_url)" \
+    && index_host="$(printf '%s' "$index_url" | sed -E 's#^[a-z]+://([^@]*@)?([^/:]+).*#\2#')" \
+    && pip install --no-cache-dir \
+        --index-url "$index_url" \
+        --trusted-host "$index_host" \
+        /tmp/dist/*.whl \
+    && rm -rf /tmp/dist
+
+# Run as a non-root user.
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --create-home appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Default host and port of the collector health check endpoint.
+ENV HEALTHCHECK_HOSTNAME=localhost
+ENV HEALTHCHECK_PORT=8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl --fail http://${HEALTHCHECK_HOSTNAME}:${HEALTHCHECK_PORT}/healthcheck || exit 1
+
+# /conf holds the collector configuration, /data the files to ingest.
+VOLUME ["/conf", "/data"]
+
+# The collectors are plain modules (no console_scripts), so the entry point is
+# the interpreter and the CMD names the collector to run. The Helm chart
+# overrides it with `python -m maas_collector.rawdata.cli.<collector>`.
+ENTRYPOINT [ "python", "-m" ]
+CMD [ "maas_collector.rawdata.cli.filesystem", "-v", "/data" ]
+
+## launch as a filesystem consumer
+# docker run -it --rm \
+#   -v $PWD/tests/data/:/data \
+#   -v $PWD/tests/conf:/conf \
+#   -e "ES_URL=http://<user>:<passwd>@<elastic_url>:<port>" \
+#   -e "AMQP_URL=http://<user>:<passwd>@<rabbitmq_url>:<port>" \
+#   maas-collector

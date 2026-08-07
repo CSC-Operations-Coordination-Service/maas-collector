@@ -1,0 +1,68 @@
+# Temporary and binary files
+*~
+*.py[cod]
+*.so
+*.cfg
+!.isort.cfg
+!setup.cfg
+*.orig
+*.log
+*.pot
+__pycache__/*
+.cache/*
+.*.swp
+*/.ipynb_checkpoints/*
+.DS_Store
+
+# Project files
+.ropeproject
+.project
+.pydevproject
+.settings
+.idea
+.vscode
+tags
+
+# Package files
+*.egg
+*.eggs/
+.installed.cfg
+*.egg-info
+
+# Unittest and coverage
+htmlcov/*
+.coverage
+.coverage.*
+.tox
+junit*.xml
+coverage.xml
+pytest-report*
+.pytest_cache/
+
+# CI artifacts (SBOM generation)
+sbom-python.cdx.json
+.sbom-venv/
+
+# Build and docs folder/files
+build/*
+dist/*
+sdist/*
+docs/api/*
+docs/_rst/*
+docs/_build/*
+cover/*
+MANIFEST
+
+# Per-project virtualenvs
+.venv*/
+.conda*/
+venv
+*.local.*
+
+# Test fixtures generated at run time
+tests/gen
+tests/data/S2B_20211113035518024483_1short_DS
+
+# ...but every committed fixture stays tracked: the patterns above (*.log,
+# *.cfg, ...) would otherwise drop the sample files the extractors are tested on.
+!tests/data/*

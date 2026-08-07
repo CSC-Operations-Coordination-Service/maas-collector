@@ -1,0 +1,6 @@
+# Keep the image build context small — only dist/ is needed for the
+# artifact-mode build (Dockerfile.local), and nothing at all for
+# Dockerfile.registry. Without this, the tests/data fixtures (tens of MB of
+# sample products) would be shipped to the builder on every build.
+**
+!dist/

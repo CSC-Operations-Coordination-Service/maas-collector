@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1
+#
+# Mode 2 — "registry": download the package that was published to the Nexus
+# PyPI repository and install it by version. No build context / wheel needed.
+#
+# The index URL (which may embed credentials) is passed as a BuildKit secret
+# so it is NOT baked into any image layer or `docker history`.
+#
+ARG PYTHON_VERSION=3.11
+ARG DEBIAN_VERSION=bookworm
+
+FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION} AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Exact version to install, e.g. "3.8.2". Provided by the pipeline.
+ARG PACKAGE_VERSION
+
+WORKDIR /app
+
+# curl backs the HEALTHCHECK below; jq is carried over from the monorepo image
+# for operator use inside the container.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# `pip_index_url` secret = full Nexus PyPI simple index, e.g.
+#   http://user:pass@nexus.example.com:8081/repository/pypi-prod-group/simple
+# The host is derived from the URL and declared trusted, since the Nexus index
+# is served over plain HTTP (pip ignores non-HTTPS indexes otherwise).
+RUN --mount=type=secret,id=pip_index_url \
+    index_url="$(cat /run/secrets/pip_index_url)" \
+    && index_host="$(printf '%s' "$index_url" | sed -E 's#^[a-z]+://([^@]*@)?([^/:]+).*#\2#')" \
+    && pip install --no-cache-dir \
+        --index-url "$index_url" \
+        --trusted-host "$index_host" \
+        "maas-collector==${PACKAGE_VERSION}"
+
+# Run as a non-root user.
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --create-home appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Default host and port of the collector health check endpoint.
+ENV HEALTHCHECK_HOSTNAME=localhost
+ENV HEALTHCHECK_PORT=8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl --fail http://${HEALTHCHECK_HOSTNAME}:${HEALTHCHECK_PORT}/healthcheck || exit 1
+
+# /conf holds the collector configuration, /data the files to ingest.
+VOLUME ["/conf", "/data"]
+
+# The collectors are plain modules (no console_scripts), so the entry point is
+# the interpreter and the CMD names the collector to run. The Helm chart
+# overrides it with `python -m maas_collector.rawdata.cli.<collector>`.
+ENTRYPOINT [ "python", "-m" ]
+CMD [ "maas_collector.rawdata.cli.filesystem", "-v", "/data" ]
