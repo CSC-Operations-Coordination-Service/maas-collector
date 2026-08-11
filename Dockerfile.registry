@@ -23,14 +23,51 @@ WORKDIR /app
 # `apt-get update` cannot reach deb.debian.org (see the HEALTHCHECK below, which
 # uses the interpreter already present in the image instead of curl).
 #
-# `pip_index_url` secret = full Nexus PyPI simple index, e.g.
-#   http://user:pass@nexus.example.com:8081/repository/pypi-prod-group/simple
+# `pip_index_url` secret = Nexus PyPI simple index, credential-free, e.g.
+#   http://nexus.example.com:8081/repository/pypi-prod-group/simple
 # The host is derived from the URL and declared trusted, since the Nexus index
 # is served over plain HTTP (pip ignores non-HTTPS indexes otherwise).
+#
+# Credentials arrive separately, as a `netrc` secret mounted at /root/.netrc —
+# the same split the nexus-context action uses on the runner. Keeping the
+# password out of the URL means it needs no percent-encoding and cannot leak
+# through pip's log lines. BuildKit mounts secrets 0400 root-owned, which is
+# what Python's netrc module demands of a default ~/.netrc.
+#
+# Each precondition is checked separately so a failure names itself instead of
+# surfacing as an opaque pip exit code. `tr -d` strips a trailing CR, which a
+# secret stored with CRLF line endings would otherwise carry into the URL.
 RUN --mount=type=secret,id=pip_index_url \
-    index_url="$(cat /run/secrets/pip_index_url)" \
-    && index_host="$(printf '%s' "$index_url" | sed -E 's#^[a-z]+://([^@]*@)?([^/:]+).*#\2#')" \
-    && pip install --no-cache-dir \
+    --mount=type=secret,id=netrc,target=/root/.netrc \
+    set -eu; \
+    if [ -z "${PACKAGE_VERSION:-}" ]; then \
+        echo "ERROR: PACKAGE_VERSION build-arg is empty" >&2; exit 1; \
+    fi; \
+    if [ ! -s /run/secrets/pip_index_url ]; then \
+        echo "ERROR: the pip_index_url secret is missing or empty (is mount-pip-index set?)" >&2; exit 1; \
+    fi; \
+    index_url="$(tr -d '\r\n' < /run/secrets/pip_index_url)"; \
+    case "$index_url" in \
+        http://*|https://*) ;; \
+        *) echo "ERROR: pip_index_url is not an http(s) URL" >&2; exit 1 ;; \
+    esac; \
+    hostpart="${index_url#*://}"; hostpart="${hostpart%%/*}"; \
+    case "$hostpart" in \
+        *@*) userinfo="${hostpart%@*}"; index_host="${hostpart##*@}" ;; \
+        *)   userinfo=""; index_host="$hostpart" ;; \
+    esac; \
+    index_host="${index_host%%:*}"; \
+    if [ -z "$index_host" ]; then \
+        echo "ERROR: could not derive the index host from pip_index_url" >&2; exit 1; \
+    fi; \
+    echo "Nexus index host: $index_host"; \
+    if [ -z "$userinfo" ] && [ ! -s /root/.netrc ]; then \
+        echo "ERROR: no Nexus credentials — pip_index_url has no userinfo and the" >&2; \
+        echo "       netrc secret is missing. Nexus answers 401 for anonymous reads." >&2; \
+        echo "       Is mount-pip-index set, and are NEXUS_USERNAME/NEXUS_PASSWORD present?" >&2; \
+        exit 1; \
+    fi; \
+    pip install --no-cache-dir --no-input \
         --index-url "$index_url" \
         --trusted-host "$index_host" \
         "maas-collector==${PACKAGE_VERSION}"
