@@ -75,6 +75,12 @@ jobs:
       artifact-path: dist/
       mount-pip-index: true
       environment: dev
+      # The Nexus Docker connector is served over plain HTTP. BuildKit runs in
+      # its own container (docker-container driver) and inherits none of the
+      # runner daemon's insecure-registries, so `docker login` succeeds while
+      # the push fails with "server gave HTTP response to HTTPS client" unless
+      # it is told explicitly. Only the Nexus host is marked plain HTTP.
+      insecure-registry: true
     secrets: inherit
 
   # Release only: build the image from the Nexus package (Mode 2), push to
@@ -101,6 +107,10 @@ jobs:
       push-to-dockerhub: true
       mount-pip-index: true
       environment: prod
+      # The prod Docker connector is plain HTTP too — see the note in
+      # docker-local. GHCR and Docker Hub are unaffected: only the host from
+      # NEXUS_DOCKER_REGISTRY_PROD is written to BuildKit's registry config.
+      insecure-registry: true
       generate-sbom: true
       sbom-project-name: maas-collector-image
       sbom-project-version: ${{ needs.ci.outputs.version }}
