@@ -1,0 +1,40 @@
+version: 2
+
+updates:
+  # GitHub Actions used by the workflows in .github/workflows.
+  # Today maas-collector.yml only calls reusable workflows from workflow-catalog at
+  # @develop, and Dependabot cannot bump a branch ref — this entry exists so
+  # that any action pinned to a tag/SHA later is maintained automatically.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "develop"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Runtime + test dependencies of the package (setup.cfg: install_requires and
+  # the `testing` extra) and the PEP 517 build requirements in pyproject.toml.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "develop"
+    groups:
+      python:
+        patterns:
+          - "*"
+
+  # Sphinx toolchain for the docs build, shared with Read the Docs
+  # (docs/requirements.txt, see .readthedocs.yml).
+  - package-ecosystem: "pip"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+    target-branch: "develop"
+    groups:
+      docs:
+        patterns:
+          - "*"

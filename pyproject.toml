@@ -1,0 +1,11 @@
+[build-system]
+# AVOID CHANGING REQUIRES: IT WILL BE UPDATED BY PYSCAFFOLD!
+requires = ["setuptools>=61", "setuptools_scm[toml]>=8", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# See configuration details in https://github.com/pypa/setuptools_scm
+version_scheme = "no-guess-dev"
+# Used only when the version can't be derived from git (e.g. the shallow
+# CI test checkout with no tags). A real tag (x.y.z) always wins over this.
+fallback_version = "3.8.2"

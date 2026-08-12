@@ -1,0 +1,118 @@
+name: maas-collector CI/CD
+
+# Thin caller for the maas-collector package. Wires the reusable building blocks
+# from the workflow-catalog repo:
+#   python-ci.yml    — test (pytest + SonarQube) -> build (wheel/sdist) -> publish to Nexus
+#   sbom.yml         — package CycloneDX SBOM -> Dependency-Track
+#   docker-build.yml — image build/push (+ image SBOM, + optional Cosign signing)
+#
+# The package lives at the repo root, so project-dir is ".".
+#
+# Triggers:
+#   push to develop   -> ci (test/build/publish to Nexus dev) + package SBOM (dev)
+#                        + develop image built from the `dist` artifact (Nexus dev)
+#   push tag x.y.z    -> ci (test/build/publish to Nexus prod) + package SBOM (prod)
+#                        + release image built from the Nexus package (Nexus prod
+#                          + GHCR + Docker Hub) + image SBOM + Cosign signature
+#   workflow_dispatch -> manual run (e.g. rebuild the develop image on demand)
+#
+# Runs on the self-hosted runner (declared inside the reusable workflows).
+
+on:
+  push:
+    branches:
+      - "develop"
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+" # release tags (x.y.z)
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Test, build the wheel/sdist, publish to Nexus. Exposes `version`.
+  ci:
+    permissions:
+      contents: read
+    uses: CSC-Operations-Coordination-Service/workflow-catalog/.github/workflows/python-ci.yml@develop
+    with:
+      project-dir: .
+      python-version: "3.11"
+    secrets: inherit
+
+  # Package SBOM -> Dependency-Track project "maas-collector".
+  # Consumes the `dist` artifact built by ci. Uses the prod Nexus context on
+  # release tags, dev otherwise.
+  sbom:
+    needs: ci
+    uses: CSC-Operations-Coordination-Service/workflow-catalog/.github/workflows/sbom.yml@develop
+    with:
+      project-dir: .
+      project-name: maas-collector
+      project-version: ${{ needs.ci.outputs.version }}
+      python-version: "3.11"
+      context: ${{ startsWith(github.ref, 'refs/tags/') && 'prod' || 'dev' }}
+    secrets: inherit
+
+  # develop / manual: build the image from the freshly built wheel (Mode 1) and
+  # push it to the Nexus Docker registry only.
+  # mount-pip-index is required even in this mode: the wheel is local but its
+  # dependencies (maas-model in particular) resolve through the Nexus PyPI index.
+  docker-local:
+    needs: ci
+    if: github.ref == 'refs/heads/develop'
+    permissions:
+      contents: read
+      packages: write
+    uses: CSC-Operations-Coordination-Service/workflow-catalog/.github/workflows/docker-build.yml@develop
+    with:
+      image-name: maas-collector
+      context: .
+      dockerfile: Dockerfile.local
+      artifact-name: dist
+      artifact-path: dist/
+      mount-pip-index: true
+      environment: dev
+      # The Nexus Docker connector is served over plain HTTP. BuildKit runs in
+      # its own container (docker-container driver) and inherits none of the
+      # runner daemon's insecure-registries, so `docker login` succeeds while
+      # the push fails with "server gave HTTP response to HTTPS client" unless
+      # it is told explicitly. Only the Nexus host is marked plain HTTP.
+      insecure-registry: true
+    secrets: inherit
+
+  # Release only: build the image from the Nexus package (Mode 2), push to
+  # Nexus + GHCR + Docker Hub, generate + upload the image SBOM, and sign the
+  # pushed image with Cosign (needs COSIGN_PRIVATE_KEY / COSIGN_PASSWORD).
+  #
+  # docker-build.yml also offers scan-dockerfile (Checkov), scan-image (Grype)
+  # and lint-image (Dockle); add them here once the image passes them.
+  docker-registry:
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      packages: write
+    uses: CSC-Operations-Coordination-Service/workflow-catalog/.github/workflows/docker-build.yml@develop
+    with:
+      image-name: maas-collector
+      context: .
+      dockerfile: Dockerfile.registry
+      build-args: |
+        PACKAGE_VERSION=${{ needs.ci.outputs.version }}
+      release: true
+      push-to-ghcr: true
+      push-to-dockerhub: true
+      mount-pip-index: true
+      environment: prod
+      # The prod Docker connector is plain HTTP too — see the note in
+      # docker-local. GHCR and Docker Hub are unaffected: only the host from
+      # NEXUS_DOCKER_REGISTRY_PROD is written to BuildKit's registry config.
+      insecure-registry: true
+      generate-sbom: true
+      sbom-project-name: maas-collector-image
+      sbom-project-version: ${{ needs.ci.outputs.version }}
+      sign-image: true
+    secrets: inherit

@@ -1,0 +1,997 @@
+"""
+Test extractor classes with first bunch of data provided by Cap Gemini Italy.
+
+Data format will surely change and some rewrite of the tests will happen.
+"""
+
+import os
+
+from maas_collector.rawdata.extractor.base import BaseExtractor, get_hash_func
+
+from maas_collector.rawdata.extractor import (
+    XMLExtractor,
+    JSONExtractor,
+    JSONExtractorExtended,
+    LogExtractor,
+    CSVExtractor,
+    XLSXExtractor,
+)
+
+# import logging
+import pytest
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+
+TEST_DICT = {"attr1": "value1", "attr2": "value2", "attr3": "value3"}
+
+
+def test_get_hash_func():
+    func = get_hash_func("attr1", "attr2")
+    assert callable(func)
+    assert func(TEST_DICT) == "b63d4be92e3bcf7a039e795a6d44e262"
+
+
+def test_convert_data_extract_values():
+    class DumbExtractor(BaseExtractor):
+        def extract(self, path, report_folder: str = ""):
+            yield self.convert_data_extract_values(TEST_DICT)
+
+    extractor = DumbExtractor(converter_map={"attr1": lambda value: value * 2})
+    data = list(extractor.extract(None))[0]
+    assert data["attr1"] == "value1value1"
+
+
+def test_json_extractor():
+    jext = JSONExtractor(
+        attr_map={
+            "productName": "$.Quality_report.Processing_data.Input_PDI",
+            "globalStatus": "$.Quality_report.Quality_cheks.'-global_status'",
+        }
+    )
+    extract = list(
+        jext.extract(
+            os.path.join(
+                DATA_DIR,
+                "PRIP_QA_20200714144443_S2B_OPER_MSI_L2A_TL_SGS__20200714T120236_A015250_T26QPE_N02.14_report.json",
+            )
+        )
+    )[0]
+    assert (
+        extract["productName"]
+        == "S2B_OPER_MSI_L2A_TL_SGS__20200714T120236_A015250_T26QPE_N02.14"
+    )
+    assert extract["globalStatus"] == "FAILED"
+
+
+def test_json_extractor_conv():
+    jext = JSONExtractor(
+        attr_map={
+            "productName": "$.Quality_report.Processing_data.Input_PDI",
+            "productDate": "$.Quality_report.Processing_data.Input_PDI",
+        },
+        converter_map={
+            "productDate": {
+                "type": "regex",
+                "expression": r".*_(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})_.*",
+                "format": "{}-{}-{}T:{}:{}:{}.00Z",
+            }
+        },
+    )
+    extract = list(
+        jext.extract(
+            os.path.join(
+                DATA_DIR,
+                "PRIP_QA_20200714144443_S2B_OPER_MSI_L2A_TL_SGS__20200714T120236_A015250_T26QPE_N02.14_report.json",
+            )
+        )
+    )[0]
+    assert (
+        extract["productName"]
+        == "S2B_OPER_MSI_L2A_TL_SGS__20200714T120236_A015250_T26QPE_N02.14"
+    )
+    assert extract["productDate"] == "2020-07-14T:12:02:36.00Z"
+
+
+def test_json_iterate():
+    jext = JSONExtractor(
+        attr_map={
+            "jiraKey": "`this`.id",
+            "author": "`this`.author.emailAddress",
+            "creationDate": "`this`.created",
+            # "globalStatus": "$.Quality_report.Quality_cheks.'-global_status'",
+        },
+        iterate_nodes="$.changelog.histories",
+    )
+    extract = list(
+        jext.extract(
+            os.path.join(
+                DATA_DIR,
+                "jira_like_json_iterate_test.json",
+            )
+        )
+    )[0]
+
+    assert extract["jiraKey"] == "1656614"
+    assert extract["author"] == "yvan.lebras@airbus.com"
+    assert extract["creationDate"] == "2020-04-03T09:27:54.000+0200"
+
+
+def test_json_iterate_partial():
+    jext = JSONExtractor(
+        attr_map={
+            "jiraKey": "`this`.id",
+            "author": "`this`.author.emailAddress",
+            "creationDate": "`this`.created",
+            "doesNotExists": "`this`.doesNotExists",
+        },
+        iterate_nodes="$.changelog.histories",
+        allow_partial=True,
+    )
+
+    extract = list(
+        jext.extract(
+            os.path.join(
+                DATA_DIR,
+                "jira_like_json_iterate_test.json",
+            )
+        )
+    )[0]
+
+    assert extract["jiraKey"] == "1656614"
+    assert extract["author"] == "yvan.lebras@airbus.com"
+    assert extract["creationDate"] == "2020-04-03T09:27:54.000+0200"
+    assert extract["doesNotExists"] is None
+
+    jext = JSONExtractor(
+        attr_map={
+            "jiraKey": "`this`.id",
+            "author": "`this`.author.emailAddress",
+            "creationDate": "`this`.created",
+            "doesNotExists": "`this`.doesNotExists",
+        },
+        iterate_nodes="$.changelog.histories",
+    )
+
+    # test no partial
+    with pytest.raises(IndexError):
+        list(
+            jext.extract(
+                os.path.join(
+                    DATA_DIR,
+                    "jira_like_json_iterate_test.json",
+                )
+            )
+        )
+
+
+def test_json_extractor_evil_python():
+    jext = JSONExtractor(
+        attr_map={
+            "satellite": {
+                "python": "lambda c: c['Quality_report']['Processing_data']['Input_PDI'][:3]"
+            },
+        }
+    )
+    extract = list(
+        jext.extract(
+            os.path.join(
+                DATA_DIR,
+                "PRIP_QA_20200714144443_S2B_OPER_MSI_L2A_TL_SGS__20200714T120236_A015250_T26QPE_N02.14_report.json",
+            )
+        )
+    )[0]
+    assert extract["satellite"] == "S2B"
+
+
+def test_xml_extractor():
+    xext = XMLExtractor(
+        attr_map={
+            # handle callable case
+            "productNameLambda": lambda root: root.find("Product").attrib["name"],
+            # handle attribue value
+            "productNameDict": {
+                "path": "Product",
+                "attr": "name",
+            },
+            # handle simple path
+            "size": "Product/Size",
+        }
+    )
+    extract = list(
+        xext.extract(
+            os.path.join(
+                DATA_DIR,
+                "S2A_OPER_PRD_L0__DS_SGS__20200420T205828_S20200322T173347_SIZE.xml",
+            )
+        )
+    )[0]
+
+    assert (
+        extract["productNameLambda"]
+        == "S2A_OPER_PRD_L0__DS_SGS__20201201T141044_S20191208T030316"
+    )
+    assert extract["productNameLambda"] == extract["productNameDict"]
+    assert extract["size"] == "132456789"
+
+
+def test_xml_partial():
+    xext = XMLExtractor(
+        attr_map={"size": "Product/Size", "doesNotExist": "I/Dont/Exist"},
+        allow_partial=True,
+    )
+    extract = list(
+        xext.extract(
+            os.path.join(
+                DATA_DIR,
+                "S2A_OPER_PRD_L0__DS_SGS__20200420T205828_S20200322T173347_SIZE.xml",
+            )
+        )
+    )[0]
+
+    assert extract["size"] == "132456789"
+    assert extract["doesNotExist"] is None
+
+
+def test_xml_root_attr():
+    xext = XMLExtractor(
+        attr_map={"datastripIdentifier": {"attr": "datastripIdentifier"}}
+    )
+    extract = list(
+        xext.extract(
+            os.path.join(
+                DATA_DIR,
+                "S2A_OPER_MTD_L0U_DS_SGS__20201201T141044_S20191208T030316.xml",
+            )
+        )
+    )[0]
+    assert (
+        extract["datastripIdentifier"]
+        == "S2A_OPER_MSI_L0U_DS_SGS__20201201T141044_S20191208T030316_N00.00"
+    )
+
+
+def test_xml_bad_attr_map():
+    with pytest.raises(ValueError):
+        XMLExtractor(attr_map={"some_attr": False})
+
+
+def test_xml_conv():
+    """"""
+    xext = XMLExtractor(
+        attr_map={"orbit_number": "General_Info/Downlink_Info/DOWNLINK_ORBIT_NUMBER"},
+        converter_map={"orbit_number": int},
+    )
+    extract = list(
+        xext.extract(
+            os.path.join(
+                DATA_DIR,
+                "S2A_OPER_MTD_L0U_DS_SGS__20201201T141044_S20191208T030316.xml",
+            )
+        )
+    )[0]
+    assert isinstance(extract["orbit_number"], int)
+    assert extract["orbit_number"] == 22357
+
+    # def test_xml_iterate_nodes_w_path():
+    xext = XMLExtractor(
+        attr_map={"dsdb_name": None},
+        iterate_nodes="dsdb_list/dsdb_name",
+    )
+    extract_list = list(
+        xext.extract(
+            os.path.join(
+                DATA_DIR,
+                "DCS_02_L20191003131732787001008_ch1_DSIB.xml",
+            )
+        )
+    )
+
+    assert len(extract_list) == 9
+    assert (
+        extract_list[0]["dsdb_name"]
+        == "DCS_02_L20191003131732787001008_ch1_DSDB_00001.raw"
+    )
+
+
+def test_xml_iterate_nodes_w_lambda():
+    xext = XMLExtractor(
+        attr_map={"dsdb_name": lambda element: element.text},
+        iterate_nodes=lambda root: root.findall("dsdb_list/dsdb_name"),
+    )
+    extract_list = list(
+        xext.extract(
+            os.path.join(
+                DATA_DIR,
+                "DCS_02_L20191003131732787001008_ch1_DSIB.xml",
+            )
+        )
+    )
+
+    assert len(extract_list) == 9
+    assert (
+        extract_list[0]["dsdb_name"]
+        == "DCS_02_L20191003131732787001008_ch1_DSDB_00001.raw"
+    )
+
+
+def test_xml_default_namespace():
+    pass
+
+
+def test_log_extractor():
+    lext = LogExtractor(
+        r"\[PRIP-INGESTOR-.+\]"
+        + r"\[(?P<publicationDate>\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3})\]\[\d+\]"
+        + r"\[MON\]PDI:\s+(?P<productName>.+)\s+has.+"
+        + r"datatakeIdentifier=\"(?P<datatakeIdentifier>.+)\"\s+"
+        + r"RECEPTION_STATION=\"(?P<receptionStation>.+)\"\s+"
+        + r"size=\"(?P<size>\d+)\".*",
+        # converter_map={"publicationDate": model.PRIPIng.convert_log_date},
+    )
+    extract = list(
+        lext.extract(
+            os.path.join(
+                DATA_DIR,
+                "PRIP_ING_20200714124400.log",
+            )
+        )
+    )[0]
+    expected = {
+        "publicationDate": "2020-07-14 14:44:44.734",
+        "productName": "S2B_OPER_MSI_L2A_TL_SGS__20200714T120236_A015250_T26QPD_N02.14",
+        "datatakeIdentifier": "GS2B_20200226T065839_015533_N02.14",
+        "receptionStation": "MTI_",
+        "size": "12233443545",
+        "reportName": "PRIP_ING_20200714124400.log",
+    }
+    assert extract == expected
+
+
+def test_csv_extractor_dict():
+    cext = CSVExtractor(
+        {
+            "satellite": "SatelliteID",
+            "DownlinkDuration": "DownlinkDuration[msec]",
+            "calculated": {"python": "lambda row: 'TEST'"},
+        }
+    )
+
+    extract = list(
+        cext.extract(
+            os.path.join(
+                DATA_DIR,
+                "MP_ALL__MTL_20210722T120000_20210809T150000.csv",
+            )
+        )
+    )
+
+    assert extract[0] == {
+        "satellite": "S2B",
+        "DownlinkDuration": "283372",
+        "reportName": "MP_ALL__MTL_20210722T120000_20210809T150000.csv",
+        "calculated": "TEST",
+    }
+
+    assert len(extract) == 1354
+
+    assert extract[-1] == {
+        "satellite": "S2B",
+        "DownlinkDuration": "401444",
+        "reportName": "MP_ALL__MTL_20210722T120000_20210809T150000.csv",
+        "calculated": "TEST",
+    }
+
+
+def test_csv_extractor_list():
+    cext = CSVExtractor(
+        ["product_id", {"field": "interface_type", "python": "lambda row: 'LTA'"}]
+    )
+
+    extract = list(
+        cext.extract(
+            os.path.join(
+                DATA_DIR,
+                "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            )
+        )
+    )
+
+    assert extract == [
+        {
+            "product_id": "S2B_OPER_MSI_L0__DS_2BPS_20220830T122617_S20220830T003155_N04.00.tar",
+            "reportName": "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            "interface_type": "LTA",
+        },
+        {
+            "product_id": "S2B_OPER_MSI_L0__GR_2BPS_20220830T122617_S20220830T003217_D11_N04.00.tar",
+            "reportName": "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            "interface_type": "LTA",
+        },
+        {
+            "product_id": "S2B_OPER_MSI_L0__GR_2BPS_20220830T122617_S20220830T003213_D12_N04.00.tar",
+            "reportName": "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            "interface_type": "LTA",
+        },
+    ]
+
+
+def test_csv_extractor_list_partial():
+    cext = CSVExtractor(
+        [
+            "product_id",
+            "missing_field",
+            {"field": "interface_type", "python": "lambda row: 'LTA'"},
+        ],
+        allow_partial=True,
+    )
+
+    extract = list(
+        cext.extract(
+            os.path.join(
+                DATA_DIR,
+                "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            )
+        )
+    )
+
+    assert extract == [
+        {
+            "product_id": "S2B_OPER_MSI_L0__DS_2BPS_20220830T122617_S20220830T003155_N04.00.tar",
+            "reportName": "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            "interface_type": "LTA",
+        },
+        {
+            "product_id": "S2B_OPER_MSI_L0__GR_2BPS_20220830T122617_S20220830T003217_D11_N04.00.tar",
+            "reportName": "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            "interface_type": "LTA",
+        },
+        {
+            "product_id": "S2B_OPER_MSI_L0__GR_2BPS_20220830T122617_S20220830T003213_D12_N04.00.tar",
+            "reportName": "OMCS-1234_LTA_S2B_DelList_20220830_V20220830_20220830.csv",
+            "interface_type": "LTA",
+        },
+    ]
+
+
+def test_xlsx_extractor_dict():
+    cext = XLSXExtractor(
+        {
+            "satellite_id": "Satellite",
+            "doy": "DOY",
+            "downlink_orbit": "Downlink Orbit",
+            "calculated": {"python": "lambda row: 'TEST'"},
+        }
+    )
+
+    extract = list(
+        cext.extract(
+            os.path.join(
+                DATA_DIR,
+                "S2_COP_REP_PERF_CGS-INS__20220522T122038_V20220521T120000_20220522T115959.xlsx",
+            )
+        )
+    )
+
+    assert extract[0] == {
+        "satellite_id": "SENTINEL-2A",
+        "doy": 141,
+        "downlink_orbit": 36102,
+        "reportName": "S2_COP_REP_PERF_CGS-INS__20220522T122038_V20220521T120000_20220522T115959.xlsx",
+        "calculated": "TEST",
+    }
+
+
+def test_xlsx_extractor_dict_partial():
+    cext = XLSXExtractor(
+        {
+            "satellite_id": "Satellite",
+            "doy": "DOY",
+            "downlink_orbit": "Downlink Orbit",
+            "calculated": {"python": "lambda row: 'TEST'"},
+            "missing_field": "Missing",
+        },
+        allow_partial=True,
+    )
+
+    extract = list(
+        cext.extract(
+            os.path.join(
+                DATA_DIR,
+                "S2_COP_REP_PERF_CGS-INS__20220522T122038_V20220521T120000_20220522T115959.xlsx",
+            )
+        )
+    )
+
+    assert extract[0] == {
+        "satellite_id": "SENTINEL-2A",
+        "doy": 141,
+        "downlink_orbit": 36102,
+        "reportName": "S2_COP_REP_PERF_CGS-INS__20220522T122038_V20220521T120000_20220522T115959.xlsx",
+        "calculated": "TEST",
+        "missing_field": None,
+    }
+
+
+def test_xlsx_extractor_list():
+    cext = XLSXExtractor(
+        ["product_id", {"field": "interface_type", "python": "lambda row: 'LTA'"}],
+        data_row_offset=0,
+    )
+
+    extract = list(
+        cext.extract(
+            os.path.join(
+                DATA_DIR, "OMCS-4321_LTA_S1A__DelList_20220823_V20220818_20220818.xlsx"
+            )
+        )
+    )
+
+    assert extract == [
+        {
+            "product_id": "S1A_IW_GRDH_1ADV_20220818T185009_20220818T185038_044610_055336_B57B.SAFE.zip",
+            "reportName": "OMCS-4321_LTA_S1A__DelList_20220823_V20220818_20220818.xlsx",
+            "interface_type": "LTA",
+        },
+        {
+            "product_id": "S1A_IW_GRDH_1ADV_20220818T185038_20220818T185103_044611_055336_CF47.SAFE.zip",
+            "reportName": "OMCS-4321_LTA_S1A__DelList_20220823_V20220818_20220818.xlsx",
+            "interface_type": "LTA",
+        },
+    ]
+
+
+def test_xlsx_extractor_list_partial():
+    cext = XLSXExtractor(
+        [
+            "product_id",
+            "missing_field",
+            {"field": "interface_type", "python": "lambda row: 'LTA'"},
+        ],
+        data_row_offset=0,
+        allow_partial=True,
+    )
+
+    extract = list(
+        cext.extract(
+            os.path.join(
+                DATA_DIR, "OMCS-4321_LTA_S1A__DelList_20220823_V20220818_20220818.xlsx"
+            )
+        )
+    )
+
+    assert extract == [
+        {
+            "product_id": "S1A_IW_GRDH_1ADV_20220818T185009_20220818T185038_044610_055336_B57B.SAFE.zip",
+            "reportName": "OMCS-4321_LTA_S1A__DelList_20220823_V20220818_20220818.xlsx",
+            "interface_type": "LTA",
+            "missing_field": None,
+        },
+        {
+            "product_id": "S1A_IW_GRDH_1ADV_20220818T185038_20220818T185103_044611_055336_CF47.SAFE.zip",
+            "reportName": "OMCS-4321_LTA_S1A__DelList_20220823_V20220818_20220818.xlsx",
+            "interface_type": "LTA",
+            "missing_field": None,
+        },
+    ]
+
+
+def test_json_extraction_with_advanced_extraction_path():
+    jext = JSONExtractorExtended(
+        attr_map={
+            "productGroup_id": '`this`.Attributes[?Name=="productGroupId"].Value',
+            "datastrip_id": '`this`.Attributes[?Name=="datastripId"].Value',
+            "qualityStatus": '`this`.Attributes[?Name=="qualityStatus"].Value',
+            "cloudCover": '`this`.Attributes[?Name=="cloudCover"].Value',
+        },
+        iterate_nodes="$.value",
+        allow_partial=True,
+    )
+    extract = list(
+        jext.extract(
+            os.path.join(
+                DATA_DIR,
+                "PRIP_S2A_ATOS_20240124T162320_20240124T163320_1000_P000000.json",
+            )
+        )
+    )
+    assert extract[0] == {
+        "productGroup_id": "GS2A_20240124T140451_044866_N05.10",
+        "reportName": "PRIP_S2A_ATOS_20240124T162320_20240124T163320_1000_P000000.json",
+        "datastrip_id": "S2A_OPER_MSI_L1C_DS_2APS_20240124T155206_S20240124T140447_N05.10",
+        "qualityStatus": "NOMINAL",
+        "cloudCover": 10.2811222880479,
+    }
+
+
+def test_xml_extractor_02():
+    xext = XMLExtractor(
+        iterate_nodes="Data_Block/List_of_DCSU_Info/",
+        allow_partial=False,
+        attr_map={
+            "file_name": {"root_path": "Fixed_Header/File_Name"},
+            "description": {"root_path": "Fixed_Header/File_Description"},
+            "notes": {"root_path": "Fixed_Header/Notes"},
+            "mission": {"root_path": "Fixed_Header/Mission"},
+            "file_class": {"root_path": "Fixed_Header/File_Class"},
+            "file_type": {"root_path": "Fixed_Header/File_Type"},
+            "creation_date": {"root_path": "Fixed_Header/Creation_Date"},
+            "session_id": {"root_path": "Fixed_Header/Session_ID"},
+            "source_system": {"root_path": "Fixed_Header/Source/System"},
+            "source_creator": {"root_path": "Fixed_Header/Source/Creator"},
+            "source_creator_version": {
+                "root_path": "Fixed_Header/Source/Creator_Version"
+            },
+            "source_creation_date": {"root_path": "Fixed_Header/Source/Creation_Date"},
+            "session_id_data": {"root_path": "Data_Block/Session_ID"},
+            "user_id": {"root_path": "Data_Block/Session_Description/User_ID"},
+            "direction": {"root_path": "Data_Block/Session_Description/Direction"},
+            "trans_mode": {"root_path": "Data_Block/Session_Description/Trans_Mode"},
+            "leo_satellite_id": {
+                "root_path": "Data_Block/Session_Description/LEO_Satellite_ID"
+            },
+            "geo_satellite_id": {
+                "root_path": "Data_Block/Session_Description/GEO_Satellite_ID"
+            },
+            "priority": {"root_path": "Data_Block/Session_Description/Priority"},
+            "start_time": {"root_path": "Data_Block/Session_Description/Start_Time"},
+            "stop_time": {"root_path": "Data_Block/Session_Description/Stop_Time"},
+            "duration": {"root_path": "Data_Block/Session_Description/Duration"},
+            "reception_profile_id": {
+                "root_path": "Data_Block/Session_Description/Reception_Profile_ID"
+            },
+            "emergency_flag": {
+                "root_path": "Data_Block/Session_Description/Emergency_Flag"
+            },
+            "dcsu_id": "DCSU_ID",
+            "execution_status": "Execution_Status",
+            "link_session_completion_time": "Link_session_completion_time",
+            "link_session_fer": "Link_session_FER",
+            "number_of_delivered_cadu": "Number_of_delivered_CADU",
+            "number_of_missing_cadu": "Number_of_missing_CADU",
+            "interface_name": {"python": "lambda c: 'MPIP_GMV_AcqPassesStatusEDRS'"},
+            "production_service_type": {"python": "lambda c: 'MPIP'"},
+            "production_service_name": {
+                "python": "lambda c: 'GMV_AcqPassesStatusEDRS'"
+            },
+        },
+        converter_map={
+            "creation_date": {
+                "type": "python",
+                "python": "lambda creation_date: creation_date[4:]",
+            },
+            "source_creation_date": {
+                "type": "python",
+                "python": "lambda source_creation_date: source_creation_date[4:]",
+            },
+            "start_time": {
+                "type": "python",
+                "python": "lambda start_time: start_time[4:]",
+            },
+            "stop_time": {
+                "type": "python",
+                "python": "lambda stop_time: stop_time[4:]",
+            },
+            "link_session_completion_time": {
+                "type": "python",
+                "python": "lambda link_session_completion_time: link_session_completion_time[4:]",
+            },
+        },
+    )
+    extracts = list(
+        xext.extract(
+            os.path.join(
+                DATA_DIR,
+                "OPER_SER_SR1_OA_20250407T235004_L20250310160540761000052.EOF",
+            )
+        )
+    )
+
+    assert len(extracts) == 2
+
+    assert extracts[0]["dcsu_id"] == "02"
+    assert extracts[1]["dcsu_id"] == "04"
+    assert (
+        extracts[0]["file_name"]
+        == "EDR_OPER_SER_SR1_OA_20250407T235004_L20250310160540761000052"
+    )
+    assert (
+        extracts[1]["file_name"]
+        == "EDR_OPER_SER_SR1_OA_20250407T235004_L20250310160540761000052"
+    )
+
+    assert extracts[0]["creation_date"] == "2025-04-07T23:50:04"
+    assert extracts[1]["creation_date"] == "2025-04-07T23:50:04"
+
+
+def test_log_extractor_02():
+    lext = LogExtractor(
+        r'(?P<month>\w{3})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(?P<process>\w+)\[(?P<pid>\d+)\]:\s*M&C\|Timeliness\|TL\|OUT\|eventtime="(?P<eventtime>[^"]+)"\|eventname="(?P<eventname>[^"]+)"\|check="(?P<check>[^"]+)"\|timelinessKey="(?P<timelinessKey>[^"]+)"\|filename="(?P<filename>[^"]+)"\|pmode="(?P<pmode>[^"]+)"\|validitystart="(?P<validitystart>[^"]+)"\|validitystop="(?P<validitystop>[^"]+)"\|generationtime="(?P<generationtime>[^"]+)"\|env="(?P<env>[^"]+)"\|ptype="(?P<ptype>[^"]+)"\|level="(?P<level>[^"]+)"\|sat="(?P<sat>[^"]+)"\|message="(?P<message>[^"]*)"\|?reftime="(?P<reftime>[^"]+)"\|?'
+    )
+
+    extract = list(
+        lext.extract(
+            os.path.join(
+                DATA_DIR,
+                "syslogSample.txt",
+            )
+        )
+    )[0]
+
+    expected = {
+        "check": "OK",
+        "day": "9",
+        "env": "N",
+        "eventname": "LOPP",
+        "eventtime": "2026-02-09T16:54:29",
+        "filename": "S3B_TM_0_NAT__G_20200121T021231_20200121T035452_20260209T162303_6141______________SVL_O_NR_OPE.ISIP",
+        "generationtime": "2020-01-21T03:54:52.000000",
+        "hostname": "s3p-s3b-pf-acq-02",
+        "level": "0",
+        "ptype": "S2B_OPER_MSI_L2A_TL_SGS__20200714T120236_A015250_T26QPD_N02.14",
+        "message": "",
+        "month": "Feb",
+        "pid": "180335",
+        "pmode": "N",
+        "process": "ThinLayer",
+        "ptype": "0",
+        "reftime": "ground",
+        "reportName": "syslogSample.txt",
+        "sat": "S3B",
+        "time": "16:54:29",
+        "timelinessKey": "SVL__DCS_01_S3B_20200928074138009060_dat",
+        "validitystart": "2020-01-21T02:12:31.000000",
+        "validitystop": "2020-01-21T03:54:52.000000",
+    }
+    assert extract == expected
+
+    extract = list(
+        lext.extract(
+            os.path.join(
+                DATA_DIR,
+                "syslogSample.txt",
+            )
+        )
+    )[0]
+
+    lext = LogExtractor(
+        r'(?P<log_date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(?P<process>\w+)\[(?P<pid>\d+)\]:\s*M&C\|Timeliness\|TL\|OUT\|eventtime="(?P<eventtime>[^"]+)"\|eventname="(?P<eventname>[^"]+)"\|check="(?P<check>[^"]+)"\|timelinessKey="(?P<timelinessKey>[^"]+)"\|filename="(?P<filename>[^"]+)"\|pmode="(?P<pmode>[^"]+)"\|validitystart="(?P<validitystart>[^"]+)"\|validitystop="(?P<validitystop>[^"]+)"\|generationtime="(?P<generationtime>[^"]+)"\|env="(?P<env>[^"]+)"\|ptype="(?P<ptype>[^"]+)"\|level="(?P<level>[^"]+)"\|sat="(?P<sat>[^"]+)"\|message="(?P<message>[^"]*)"\|reftime="(?P<reftime>[^"]+)"\|'
+    )
+    extract = list(
+        lext.extract(
+            os.path.join(
+                DATA_DIR,
+                "thinlayer.txt",
+            )
+        )
+    )
+
+    assert len(extract) == 1
+
+
+def test_log_extractor_cadu_02():
+    lext = LogExtractor(
+        r"^(?P<log_date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(RESTCaduPollingAgent)\[(?P<pid>\d+)\]:\s+M&C\|(?P<domain>[^|]+)\|(?P<code>[^|]+)\|(?P<action>[^|]+)\|(?:(?=.*\bjobid=(?P<jobid>\d+)\|))?(?:(?=.*\bhost=\"(?P<host>[^\"]+)\"\|))?(?:(?=.*\bfromurl=\"(?P<fromurl>[^\"]+)\"\|))?(?:(?=.*\bfilename=\"(?P<filename>[^\"]+)\"\|))?(?:(?=.*\bcreationtime=\"(?P<creationtime>[^\"]+)\"\|))?(?:(?=.*\breftime=\"(?P<reftime>[^\"]+)\"\|))?(?:(?=.*\beventtime=\"(?P<eventtime>[^\"]+)\"\|))?(?:(?=.*\bstatus=\"(?P<status>[^\"]+)\"\|))?(?:(?=.*\btimelinessKey=\"(?P<timelinessKey>[^\"]+)\"\|))?(?:(?=.*\btourl=\"(?P<tourl>[^\"]+)\"\|))?(?:(?=.*\bqueueid=(?P<queueid>\d+)\|))?(?:(?=.*\bfilesize=(?P<filesize>\d+)\|))?.*$"
+    )
+
+    extracts = list(
+        lext.extract(
+            os.path.join(
+                DATA_DIR,
+                "Satu",
+                "log-all-sample.md",
+            )
+        )
+    )
+    assert len(extracts) == 11
+
+    assert extracts[0] == {
+        "action": "IN",
+        "code": "IMP",
+        "creationtime": "2026-02-24T12:49:16.262Z",
+        "domain": "Data Import",
+        "eventtime": None,
+        "filename": "S3A_20260224124856052200",
+        "filesize": None,
+        "fromurl": "https://api.esa-copernicus.ksat.no/cadip/odata/v1",
+        "host": "api.esa-copernicus.ksat.no",
+        "hostname": "s3p-s3a-pf-acq-01",
+        "jobid": "10783",
+        "log_date": "2026-02-24T12:57:16.571955+00:00",
+        "pid": "946773",
+        "queueid": None,
+        "reftime": None,
+        "reportName": "log-all-sample.md",
+        "status": None,
+        "timelinessKey": None,
+        "tourl": None,
+    }
+    assert extracts[1] == {
+        "action": "REF",
+        "code": "TL",
+        "creationtime": None,
+        "domain": "Timeliness",
+        "eventtime": "2026-02-24T12:56:49",
+        "filename": None,
+        "filesize": None,
+        "fromurl": None,
+        "host": None,
+        "hostname": "s3p-s3a-pf-acq-01",
+        "jobid": None,
+        "log_date": "2026-02-24T12:58:46.206271+00:00",
+        "pid": "1014681",
+        "queueid": None,
+        "reftime": "ground",
+        "reportName": "log-all-sample.md",
+        "status": None,
+        "timelinessKey": "SVL__DCS_03_S3A_20260224124856052200_dat",
+        "tourl": None,
+    }
+    assert extracts[2] == {
+        "action": "CHECK",
+        "code": "IMP",
+        "creationtime": None,
+        "domain": "Data Import",
+        "eventtime": None,
+        "filename": None,
+        "filesize": None,
+        "fromurl": None,
+        "host": "api.esa-copernicus.ksat.no",
+        "hostname": "s3p-s3a-pf-acq-01",
+        "jobid": None,
+        "log_date": "2026-02-24T14:25:02.475462+00:00",
+        "pid": "946773",
+        "queueid": None,
+        "reftime": None,
+        "reportName": "log-all-sample.md",
+        "status": "NOMINAL",
+        "timelinessKey": None,
+        "tourl": None,
+    }
+    assert extracts[4] == {
+        "action": "IN",
+        "code": "DC",
+        "creationtime": None,
+        "domain": "Data Circulation",
+        "eventtime": None,
+        "filename": "DCS_03_S3A_20260224142835052201_ch1_DSDB_00002.raw",
+        "filesize": "314571600",
+        "fromurl": "https://api.esa-copernicus.ksat.no/cadip/odata/v1",
+        "host": None,
+        "hostname": "s3p-s3a-pf-acq-01",
+        "jobid": None,
+        "log_date": "2026-02-24T14:29:07.309196+00:00",
+        "pid": "946773",
+        "queueid": "11102",
+        "reftime": None,
+        "reportName": "log-all-sample.md",
+        "status": None,
+        "timelinessKey": None,
+        "tourl": None,
+    }
+    assert extracts[10] == {
+        "action": "OUT",
+        "code": "DC",
+        "creationtime": None,
+        "domain": "Data Circulation",
+        "eventtime": None,
+        "filename": "DCS_03_S3A_20260224124856052200_ch1_DSDB_00041.raw",
+        "filesize": "314571600",
+        "fromurl": None,
+        "host": None,
+        "hostname": "s3p-s3a-pf-acq-01",
+        "jobid": None,
+        "log_date": "2026-02-24T12:55:34.824727+00:00",
+        "pid": "946773",
+        "queueid": "10977",
+        "reftime": None,
+        "reportName": "log-all-sample.md",
+        "status": None,
+        "timelinessKey": None,
+        "tourl": "/data/S3GTW/CADU/S3A/SVL_/DCS_03_S3A_20260224124856052200_dat/ch_1",
+    }
+
+
+def test_log_extractor_cadu_03_circulation_agent():
+    lext = LogExtractor(
+        r"^(?P<log_date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(CirculationAgent)\[(?P<pid>\d+)\]:\s+M&C\|(?P<domain>[^|]+)\|(?P<code>[^|]+)\|(?P<action>[^|]+)\|(?:(?=.*\bfilename=\"(?P<filename>[^\"]+)\"\|))?(?:(?=.*\bqueueid=(?P<queueid>\d+)\|))?(?:(?=.*\btourl=\"(?P<tourl>[^\"]+)\"\|))?(?:(?=.*\bfilesize=(?P<filesize>\d+)\|))?(?:(?=.*\bstatus=\"(?P<status>[^\"]+)\"\|))?.*$"
+    )
+
+    extracts = list(
+        lext.extract(
+            os.path.join(
+                DATA_DIR,
+                "Satu",
+                "log-all-sample.md",
+            )
+        )
+    )
+
+    assert len(extracts) == 38
+
+    assert extracts[0] == {
+        "action": "OUT",
+        "code": "DC",
+        "domain": "Data Circulation",
+        "filename": "S3A_OL_0_EFR__G_20260224T112059_20260224T112259_20260224T125814_0120______________SVL_O_NR_OPE.ISIP",
+        "filesize": "916275048",
+        "hostname": "s3p-s3a-pf-acq-01",
+        "log_date": "2026-02-24T12:59:32.857600+00:00",
+        "pid": "1122",
+        "queueid": "11011",
+        "reportName": "log-all-sample.md",
+        "status": None,
+        "tourl": "/data/ACQ_CACHE/Level0-cache/S3A/S3A_OL_0_EFR__G_20260224T112059_20260224T112259_20260224T125814_0120______________SVL_O_NR_OPE.ISIP",
+    }
+    assert extracts[1] == {
+        "action": "RUNNING",
+        "code": "DC",
+        "domain": "Data Circulation",
+        "filename": "S3A_OL_0_EFR__G_20260224T114059_20260224T114259_20260224T125818_0120______________SVL_O_NR_OPE.ISIP",
+        "filesize": None,
+        "hostname": "s3p-s3a-pf-acq-01",
+        "log_date": "2026-02-24T12:59:32.983142+00:00",
+        "pid": "1122",
+        "queueid": "11043",
+        "reportName": "log-all-sample.md",
+        "status": "QUEUE_OUT",
+        "tourl": None,
+    }
+
+    assert extracts[2] == {
+        "action": "OUT",
+        "code": "DC",
+        "domain": "Data Circulation",
+        "filename": "S3A_SR_0_SRA__G_20260225T150316_20260225T151316_20260225T155148_0600______________SVL_O_NR_OPE.ISIP",
+        "filesize": "824695764",
+        "hostname": "s3p-s3a-pf-acq-01",
+        "log_date": "2026-02-25T15:59:19.626365+00:00",
+        "pid": "1122",
+        "queueid": "15236",
+        "reportName": "log-all-sample.md",
+        "status": None,
+        "tourl": "ftp://user:pasword@s3-refidcs01/data/to_MRN/to_IDC_NEW/from_ACQ/High/S3A_SR_0_SRA__G_20260225T150316_20260225T151316_20260225T155148_0600______________SVL_O_NR_OPE.ISIP",
+    }
+
+    assert extracts[29] == {
+        "action": "RUNNING",
+        "code": "DC",
+        "domain": "Data Circulation",
+        "filename": "S3A_OL_0_EFR__G_20260225T155337_20260225T155537_20260225T173122_0120______________SVL_O_NR_OPE.ISIP",
+        "filesize": None,
+        "hostname": "s3p-s3a-pf-acq-01",
+        "log_date": "2026-02-25T17:32:17.173216+00:00",
+        "pid": "1122",
+        "queueid": "15421",
+        "reportName": "log-all-sample.md",
+        "status": "QUEUE_OUT",
+        "tourl": None,
+    }
+    assert extracts[30] == {
+        "action": "OUT",
+        "code": "DC",
+        "domain": "Data Circulation",
+        "filename": "S3A_TM_0_NAT__G_20260225T154252_20260225T172228_20260225T172346_5976______________SVL_O_NR_OPE.ISIP",
+        "filesize": "2560976",
+        "hostname": "s3p-s3a-pf-acq-01",
+        "log_date": "2026-02-25T17:32:17.249249+00:00",
+        "pid": "1122",
+        "queueid": "15383",
+        "reportName": "log-all-sample.md",
+        "status": None,
+        "tourl": "/data/ACQ_CACHE/Level0-cache/S3A/S3A_TM_0_NAT__G_20260225T154252_20260225T172228_20260225T172346_5976______________SVL_O_NR_OPE.ISIP",
+    }
+
+    assert extracts[37] == {
+        "action": "RUNNING",
+        "code": "DC",
+        "domain": "Data Circulation",
+        "filename": "S3A_OL_0_EFR__G_20260225T155537_20260225T155737_20260225T173122_0120______________SVL_O_NR_OPE.ISIP",
+        "filesize": None,
+        "hostname": "s3p-s3a-pf-acq-01",
+        "log_date": "2026-02-25T17:32:18.050624+00:00",
+        "pid": "1122",
+        "queueid": "15423",
+        "reportName": "log-all-sample.md",
+        "status": "QUEUE_OUT",
+        "tourl": None,
+    }

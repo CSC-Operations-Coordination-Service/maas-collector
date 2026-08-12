@@ -1,0 +1,115 @@
+# syntax=docker/dockerfile:1
+#
+# Mode 1 — "local": install the wheel produced by a local/CI build.
+# In the pipeline the wheel is handed over via actions/upload-artifact +
+# download-artifact; locally just run `tox -e build` first.
+# The `dist/` directory is expected to be present in the build context.
+#
+# maas-model is not published on public PyPI, so the runtime dependencies are
+# resolved through the Nexus PyPI index. It is passed as a BuildKit secret
+# (`mount-pip-index: true` in the caller) so a credentialed URL never lands in
+# an image layer nor in `docker history`.
+#
+ARG PYTHON_VERSION=3.11
+ARG DEBIAN_VERSION=bookworm
+
+FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION} AS runtime
+
+# Don't write .pyc files / buffer stdout (better container logs).
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# No apt layer on purpose: the CI runner has no direct internet egress, so
+# `apt-get update` cannot reach deb.debian.org (see the HEALTHCHECK below, which
+# uses the interpreter already present in the image instead of curl).
+#
+# Bring in the pre-built distribution and install it.
+#
+# `pip_index_url` secret = Nexus PyPI simple index, credential-free, e.g.
+#   http://nexus.example.com:8081/repository/pypi-dev-group/simple
+# The group also proxies PyPI, so every dependency resolves through it. The host
+# is derived from the URL and declared trusted, since the Nexus index is served
+# over plain HTTP (pip ignores non-HTTPS indexes otherwise).
+#
+# Credentials arrive separately, as a `netrc` secret mounted at /root/.netrc —
+# the same split the nexus-context action uses on the runner. Keeping the
+# password out of the URL means it needs no percent-encoding and cannot leak
+# through pip's log lines. BuildKit mounts secrets 0400 root-owned, which is
+# what Python's netrc module demands of a default ~/.netrc.
+COPY dist/ /tmp/dist/
+# Each precondition is checked separately so a failure names itself instead of
+# surfacing as an opaque pip exit code. `tr -d` strips a trailing CR, which a
+# secret stored with CRLF line endings would otherwise carry into the URL.
+RUN --mount=type=secret,id=pip_index_url \
+    --mount=type=secret,id=netrc,target=/root/.netrc \
+    set -eu; \
+    if [ ! -s /run/secrets/pip_index_url ]; then \
+        echo "ERROR: the pip_index_url secret is missing or empty (is mount-pip-index set?)" >&2; exit 1; \
+    fi; \
+    index_url="$(tr -d '\r\n' < /run/secrets/pip_index_url)"; \
+    case "$index_url" in \
+        http://*|https://*) ;; \
+        *) echo "ERROR: pip_index_url is not an http(s) URL" >&2; exit 1 ;; \
+    esac; \
+    hostpart="${index_url#*://}"; hostpart="${hostpart%%/*}"; \
+    case "$hostpart" in \
+        *@*) userinfo="${hostpart%@*}"; index_host="${hostpart##*@}" ;; \
+        *)   userinfo=""; index_host="$hostpart" ;; \
+    esac; \
+    index_host="${index_host%%:*}"; \
+    if [ -z "$index_host" ]; then \
+        echo "ERROR: could not derive the index host from pip_index_url" >&2; exit 1; \
+    fi; \
+    echo "Nexus index host: $index_host"; \
+    if [ -z "$userinfo" ] && [ ! -s /root/.netrc ]; then \
+        echo "ERROR: no Nexus credentials — pip_index_url has no userinfo and the" >&2; \
+        echo "       netrc secret is missing. Nexus answers 401 for anonymous reads." >&2; \
+        echo "       Is mount-pip-index set, and are NEXUS_USERNAME/NEXUS_PASSWORD present?" >&2; \
+        exit 1; \
+    fi; \
+    set -- /tmp/dist/*.whl; \
+    if [ ! -f "$1" ]; then \
+        echo "ERROR: no wheel in dist/ — the 'dist' artifact is empty or holds only an sdist:" >&2; \
+        ls -l /tmp/dist >&2; exit 1; \
+    fi; \
+    echo "Installing: $*"; \
+    pip install --no-cache-dir --no-input \
+        --index-url "$index_url" \
+        --trusted-host "$index_host" \
+        "$@"; \
+    rm -rf /tmp/dist
+
+# Run as a non-root user.
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --create-home appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Default host and port of the collector health check endpoint.
+ENV HEALTHCHECK_HOSTNAME=localhost
+ENV HEALTHCHECK_PORT=8080
+
+# The health endpoint is served at "/" (health.py registers the rule "/" under
+# the *endpoint name* "healthcheck" — the path is not /healthcheck).
+# The probe reads the two variables above itself, so exec form is safe.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD ["python", "-c", "import os,urllib.request;urllib.request.urlopen('http://%s:%s/' % (os.environ.get('HEALTHCHECK_HOSTNAME','localhost'),os.environ.get('HEALTHCHECK_PORT','8080')),timeout=5)"]
+
+# /conf holds the collector configuration, /data the files to ingest.
+VOLUME ["/conf", "/data"]
+
+# The collectors are plain modules (no console_scripts), so the entry point is
+# the interpreter and the CMD names the collector to run. The Helm chart
+# overrides it with `python -m maas_collector.rawdata.cli.<collector>`.
+ENTRYPOINT [ "python", "-m" ]
+CMD [ "maas_collector.rawdata.cli.filesystem", "-v", "/data" ]
+
+## launch as a filesystem consumer
+# docker run -it --rm \
+#   -v $PWD/tests/data/:/data \
+#   -v $PWD/tests/conf:/conf \
+#   -e "ES_URL=http://<user>:<passwd>@<elastic_url>:<port>" \
+#   -e "AMQP_URL=http://<user>:<passwd>@<rabbitmq_url>:<port>" \
+#   maas-collector
