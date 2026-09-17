@@ -453,6 +453,7 @@ class FileCollector(CredentialMixin):
         report_name="",
         report_folder="",
         iter_callback=None,
+        extra_fields: dict = None,
     ) -> None:
         """collect raw data from file and write to raw data database"""
         # shortcut for logging
@@ -480,6 +481,7 @@ class FileCollector(CredentialMixin):
             report_name=report_name,
             report_folder=report_folder,
             iter_callback=iter_callback,
+            extra_fields=extra_fields,
         )
 
         self.action_iterator_errors = []

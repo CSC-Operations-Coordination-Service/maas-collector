@@ -6,11 +6,12 @@ import json
 import os
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import dateutil.parser
 import jira
 import jira.resources
+from maas_model import datestr_to_zulu
 from maas_collector.rawdata.collector.filecollector import (
     FileCollector,
     FileCollectorConfiguration,
@@ -47,6 +48,15 @@ class JiraExtendedCollectorConfiguration(FileCollectorConfiguration):
     ingest_attachements: bool = False
 
     attachement_prefix: bool = False
+
+    # {raw data field name: jira.resources.Attachment attribute name} stamped on
+    # every record extracted from an attachment of this interface. Empty by
+    # default, so interfaces that do not opt in are left untouched.
+    attachment_extra_fields: Dict[str, str] = field(default_factory=dict)
+
+    # attachment_extra_fields entries whose value is a date and must be
+    # normalised to ZULU before being stamped
+    attachment_date_fields: List[str] = field(default_factory=list)
 
     refresh_interval: int = 0
 
@@ -256,9 +266,17 @@ class JIRAExtendedCollector(FileCollector):
                 else:
                     prefix = ""
 
+                if config.attachment_extra_fields:
+                    # JIRA allows several attachments to share a file name on the
+                    # same issue. They download to the same path and produce the
+                    # same document identifiers, but carry different attachment
+                    # identities, so they would overwrite each other at every
+                    # collect. Only the most recent one is the current list.
+                    attachments = self.deduplicate_attachments(attachments)
+
                 for attachment in attachments:
                     self._healthcheck.tick()
-                    self.ingest_attachement(attachment, prefix)
+                    self.ingest_attachement(attachment, prefix, config)
 
             # save only at the end of the page cause of compatibility with
             # json extractor
@@ -302,13 +320,86 @@ class JIRAExtendedCollector(FileCollector):
         finally:
             os.remove(filename)
 
+    @staticmethod
+    def deduplicate_attachments(attachments: list) -> list:
+        """Keep only the most recently created attachment of each file name
+
+        Args:
+            attachments (list): attachments of an issue
+
+        Returns:
+            list: at most one attachment per file name
+        """
+        newest = {}
+
+        for attachment in attachments:
+            current = newest.get(attachment.filename)
+
+            if current is None or dateutil.parser.parse(
+                attachment.created
+            ) > dateutil.parser.parse(current.created):
+                newest[attachment.filename] = attachment
+
+        return list(newest.values())
+
+    def build_attachment_extra_fields(
+        self,
+        attachment: jira.resources.Attachment,
+        config: JiraExtendedCollectorConfiguration = None,
+    ) -> dict:
+        """Build the fields identifying the attachment a record was extracted from
+
+        A JIRA attachment identifier changes at every upload, even when the file
+        name and the file content are strictly identical. Stamping it on every
+        record makes a re-upload visible downstream: the records still listed by
+        the new file get the new identifier, while the records dropped from it keep
+        the previous one.
+
+        Args:
+            attachment (jira.resources.Attachment): attachment object
+            config (JiraExtendedCollectorConfiguration): the issue configuration
+
+        Returns:
+            dict: fields to stamp, empty if the interface does not opt in
+        """
+        if not config or not config.attachment_extra_fields:
+            return {}
+
+        extra_fields = {}
+
+        for field_name, attr_name in config.attachment_extra_fields.items():
+            try:
+                value = getattr(attachment, attr_name)
+            except AttributeError:
+                self.logger.warning(
+                    "Attachment %s has no attribute '%s': field '%s' not stamped",
+                    attachment.id,
+                    attr_name,
+                    field_name,
+                )
+                continue
+
+            if field_name in config.attachment_date_fields:
+                # JIRA dates look like '2024-05-13T09:12:33.000+0200': a basic
+                # format offset that the opensearch date_time format rejects
+                value = datestr_to_zulu(value)
+
+            extra_fields[field_name] = value
+
+        return extra_fields
+
     def ingest_attachement(
-        self, attachment: jira.resources.Attachment, prefix: str = ""
+        self,
+        attachment: jira.resources.Attachment,
+        prefix: str = "",
+        config: JiraExtendedCollectorConfiguration = None,
     ):
         """Ingest a attached file
 
         Args:
             attachment (jira.resources.Attachment): attachment object
+            prefix (str): prefix prepended to the downloaded file name
+            config (JiraExtendedCollectorConfiguration): the issue configuration
         """
 
         configurations = self.get_configurations(attachment.filename)
@@ -331,6 +422,8 @@ class JIRAExtendedCollector(FileCollector):
         with open(download_path, "wb") as attacement_fd:
             attacement_fd.write(attachment.get())
 
+        extra_fields = self.build_attachment_extra_fields(attachment, config)
+
         try:
             for configuration in configurations:
                 try:
@@ -339,6 +432,7 @@ class JIRAExtendedCollector(FileCollector):
                         configuration,
                         force_update=self.args.force,
                         report_name=os.path.basename(download_path),
+                        extra_fields=extra_fields,
                     )
                 # catch broad exception to not break the loop
                 # pylint: disable=W0703

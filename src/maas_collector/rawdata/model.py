@@ -21,6 +21,7 @@ class ActionIterator:
         report_name="",
         report_folder="",
         iter_callback=None,
+        extra_fields: dict = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -37,6 +38,11 @@ class ActionIterator:
         self.report_folder = report_folder
 
         self.iter_callback = iter_callback
+
+        # additional fields merged into every extracted record. Used by collectors
+        # that know something about the origin of a file that the extractor cannot
+        # see, like the identity of the JIRA attachment it was downloaded from.
+        self.extra_fields = extra_fields or {}
 
         self.action_iterator_errors = []
 
@@ -239,6 +245,11 @@ class ActionIterator:
 
             if self.report_folder:
                 data_extract["reportFolder"] = self.report_folder
+
+            if self.extra_fields:
+                # merged last, and before the identifier is computed from the
+                # record, so that a collector may deliberately override anything
+                data_extract |= self.extra_fields
 
             # populate data chunk
             data_chunk.append(data_extract)
