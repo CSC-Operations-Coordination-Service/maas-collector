@@ -12,6 +12,7 @@ maas-collector uses JSON file to store:
       "id_field": "...",
       "file_pattern": "...",
       "routing_key": "...",
+      "exchange_name": "...",
       "model": {},
       "extractor": {}
     }
@@ -36,6 +37,13 @@ A collector configuration is a JSON object containing the following keys:
 
 `routing_key`
 : A string providing the AMPQ queue name to emit message after model entity creation in the raw storage.
+
+`exchange_name`
+: Optional. A string naming the AMQP exchange the messages of this configuration
+are published to. Defaults to the value of `--amqp-exchange` / `AMQP_EXCHANGE`,
+itself `collect-exchange` unless set. Declaring it per configuration is what
+allows one collector process to ventilate its messages over several exchanges.
+See [common options](common_options.md#choosing-the-destination-exchange).
 
 `model`
 : An object describing the OpenSearch document model. See below for details.
@@ -151,3 +159,7 @@ To group the identifiers provided by extraction,
   }
 }
 ```
+
+Chunking is keyed by routing key alone, but the buffers are kept per
+`(exchange, routing key)` pair: two configurations sharing a routing key while
+publishing to different exchanges accumulate, and flush, separately.

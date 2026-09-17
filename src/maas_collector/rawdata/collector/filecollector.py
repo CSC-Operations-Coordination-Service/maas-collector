@@ -79,6 +79,10 @@ class CollectorArgs:
 
     amqp_priority: int = 0
 
+    # default publishing exchange for every configuration that does not name
+    # one; empty means the maas-collector default (collect-exchange)
+    amqp_exchange: str = ""
+
     replay: ReplayArgs = None
 
     healthcheck_timeout: int = None
@@ -119,6 +123,12 @@ class FileCollectorConfiguration:
     interface_credentials: str = ""
 
     file_routing_key: str = ""
+
+    # destination exchange for the messages this configuration emits. Empty
+    # means the collector default (--amqp-exchange / AMQP_EXCHANGE), which is
+    # itself collect-exchange unless set. This is what lets one collector
+    # process ventilate its messages over several exchanges.
+    exchange_name: str = ""
 
     no_probe: bool = False
 
@@ -286,6 +296,7 @@ class FileCollector(CredentialMixin):
             priority=self.args.amqp_priority,
             max_retries=self.args.amqp_retries,
             pipeline_name=self.__class__.__name__,
+            exchange_name=self.args.amqp_exchange,
         )
 
         self._backup = None

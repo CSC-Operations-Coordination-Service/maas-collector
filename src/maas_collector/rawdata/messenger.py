@@ -7,12 +7,15 @@ from typing import Dict
 import socket
 
 
-from kombu import BrokerConnection, Producer
+from kombu import BrokerConnection, Exchange, Producer
 from kombu.common import maybe_declare
 
 from maas_model import MAASMessage
 
-from maas_collector.queues.queues import PUBLISH_EXCHANGE
+from maas_collector.queues.queues import (
+    DEFAULT_PUBLISH_EXCHANGE_NAME,
+    build_publish_exchange,
+)
 
 
 class Messenger:
@@ -27,11 +30,16 @@ class Messenger:
         priority: int = 0,
         max_retries: int = 0,
         pipeline_name: str = "Collector",
+        exchange_name: str = DEFAULT_PUBLISH_EXCHANGE_NAME,
     ):
         self.logger: logging.Logger = logging.getLogger(pipeline_name)
 
         # rabbitmq url
         self.url: str = url
+
+        # default publishing exchange, used by every configuration that does
+        # not name one of its own
+        self.exchange_name: str = exchange_name or DEFAULT_PUBLISH_EXCHANGE_NAME
 
         self.priority: int = priority
 
@@ -45,11 +53,19 @@ class Messenger:
         # message emitter
         self._producer: Producer | None = None
 
-        # message group configuration
+        # message group configuration, keyed by routing key: chunking is a
+        # property of the message flow, not of its destination exchange
         self.chunk_config: Dict[str, int] = {}
 
-        # grouped messages
+        # grouped messages, keyed by (exchange name, routing key): two
+        # configurations may share a routing key and differ in exchange
         self.message_groups = {}
+
+        # Exchange instances by name, built on demand
+        self._exchanges: Dict[str, Exchange] = {}
+
+        # names of the exchanges already declared on the broker
+        self._declared: set[str] = set()
 
     @property
     def connection(self) -> BrokerConnection:
@@ -79,11 +95,50 @@ class Messenger:
             Producer: initialized producer
         """
         if self._producer is None:
+            default_exchange = self.get_exchange(self.exchange_name)
             self._producer = self.connection.Producer(
-                exchange=PUBLISH_EXCHANGE, on_return=self._on_return
+                exchange=default_exchange, on_return=self._on_return
             )
-            maybe_declare(PUBLISH_EXCHANGE, self._producer.channel)
+            # the channel only exists once the producer does, so the default
+            # exchange is declared here rather than in get_exchange()
+            self._declare(default_exchange, self._producer.channel)
         return self._producer
+
+    def get_exchange(self, name: str = "") -> Exchange:
+        """get the Exchange instance for a name, building it on first use
+
+        Nothing is sent to the broker here: declaration needs a channel, and
+        the channel needs the producer, which is built from the default
+        exchange. See _declare().
+
+        Args:
+            name (str, optional): exchange name. Defaults to the messenger one.
+
+        Returns:
+            Exchange: durable topic exchange
+        """
+        name = name or self.exchange_name
+
+        if name not in self._exchanges:
+            self._exchanges[name] = build_publish_exchange(name)
+
+        return self._exchanges[name]
+
+    def _declare(self, exchange: Exchange, channel) -> None:
+        """declare an exchange on the broker, once per exchange
+
+        Args:
+            exchange (Exchange): exchange to declare
+            channel: channel to declare it on
+        """
+        if exchange.name in self._declared:
+            return
+
+        maybe_declare(exchange, channel)
+
+        self._declared.add(exchange.name)
+
+        self.logger.debug("AMQP: declared exchange %s", exchange.name)
 
     def setup(self):
         """Connect to the AMQP broker and setup message producer"""
@@ -134,6 +189,11 @@ class Messenger:
             # don't send any message
             return
 
+        # a configuration may name its own destination exchange; fall back on
+        # the messenger default. getattr keeps configuration classes that do
+        # not carry the field working.
+        exchange_name = getattr(config, "exchange_name", "") or self.exchange_name
+
         document_indices = [index] if index is not None else []
 
         if not config.routing_key in self.chunk_config:
@@ -146,16 +206,19 @@ class Messenger:
                     document_indices=document_indices,
                     pipeline=[self.pipeline_name],
                 ),
+                exchange_name=exchange_name,
             )
             return
 
         chunk_size = self.chunk_config[config.routing_key]
 
-        # get the message group for the routing key
-        if config.routing_key in self.message_groups:
-            group = self.message_groups[config.routing_key]
+        # get the message group for this destination
+        group_key = (exchange_name, config.routing_key)
+
+        if group_key in self.message_groups:
+            group = self.message_groups[group_key]
         else:
-            group = self.message_groups[config.routing_key] = {}
+            group = self.message_groups[group_key] = {}
 
         # get the document identifier and index list for the model
         if config.model_name in group:
@@ -188,6 +251,7 @@ class Messenger:
                     document_indices=info["document_indices"][:chunk_size],
                     pipeline=[self.pipeline_name],
                 ),
+                exchange_name=exchange_name,
             )
 
             # remove the chunk
@@ -196,7 +260,7 @@ class Messenger:
 
     def flush_message_groups(self):
         """clear the document identifier cache"""
-        for routing_key, group in self.message_groups.items():
+        for (exchange_name, routing_key), group in self.message_groups.items():
             for model_name, info in group.items():
                 # filter empty identifier list
 
@@ -211,16 +275,21 @@ class Messenger:
                         document_indices=info["document_indices"],
                         pipeline=[self.pipeline_name],
                     ),
+                    exchange_name=exchange_name,
                 )
 
         self.message_groups.clear()
 
-    def send_to_queue(self, routing_key: str, payload: MAASMessage):
+    def send_to_queue(
+        self, routing_key: str, payload: MAASMessage, exchange_name: str = ""
+    ):
         """send creation / update message to rabbitmq
 
         Args:
             routing_key (str): routing key on the publishing exchange
             payload (MAASMessage): payload containing document ids and indices
+            exchange_name (str, optional): destination exchange. Defaults to the
+                messenger one.
         """
         # Keep only unique index
         payload.document_indices = list(set(payload.document_indices))
@@ -228,10 +297,12 @@ class Messenger:
 
         body = dataclasses.asdict(payload)
 
+        exchange = self.get_exchange(exchange_name)
+
         self.logger.info(
             "MSG %s PUBLISHING TO %s/%s",
             payload.message_id,
-            PUBLISH_EXCHANGE.name,
+            exchange.name,
             routing_key,
         )
 
@@ -240,10 +311,15 @@ class Messenger:
         json_body = json.dumps(body)
 
         try:
-            self.producer.publish(
+            # resolve the producer first: _declare needs its channel
+            producer = self.producer
+
+            self._declare(exchange, producer.channel)
+
+            producer.publish(
                 json_body,
                 content_type="application/json",
-                exchange=PUBLISH_EXCHANGE,
+                exchange=exchange,
                 routing_key=routing_key,
                 delivery_mode="persistent",
                 mandatory=True,
@@ -259,7 +335,7 @@ class Messenger:
             self.logger.info(
                 "MSG %s PUBLISHED TO %s/%s %d %s",
                 payload.message_id,
-                PUBLISH_EXCHANGE.name,
+                exchange.name,
                 routing_key,
                 len(payload.document_ids),
                 payload.document_class,
@@ -268,7 +344,7 @@ class Messenger:
             self.logger.error(
                 "MSG %s FAILED TO PUBLISH TO %s/%s %d %s (%s)",
                 payload.message_id,
-                PUBLISH_EXCHANGE.name,
+                exchange.name,
                 routing_key,
                 len(payload.document_ids),
                 payload.document_class,
@@ -277,7 +353,7 @@ class Messenger:
             self.logger.error(
                 "MSG %s UNPUBLISHED on %s/%s PAYLOAD %s",
                 payload.message_id,
-                PUBLISH_EXCHANGE.name,
+                exchange.name,
                 routing_key,
                 json_body,
             )
