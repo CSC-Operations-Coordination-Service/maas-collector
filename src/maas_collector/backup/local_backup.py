@@ -1,7 +1,8 @@
 import os
 import shutil
+from typing import List
 
-from maas_collector.backup.backup import CollectorBackup
+from maas_collector.backup.backup import BackupReport, CollectorBackup
 
 
 class CollectorBackupLocal(CollectorBackup):
@@ -11,14 +12,34 @@ class CollectorBackupLocal(CollectorBackup):
         CollectorBackup (CollectorBackup): Main Backup Collector Class
     """
 
+    # IOError is an alias of OSError in python 3, which is what the inlined
+    # try/except used to catch here
+    TRANSFER_ERRORS = (OSError,)
+
     def close(self):
         "Nothing to close"
-        pass
 
-    def backup_file_implementation(self, config, path):
+    @property
+    def destinations(self) -> List[str]:
+        """override: a local backup has a single destination directory"""
+        return [self.args.directory]
 
-        try:
-            local_file_path = "/".join(self.get_backup_path(config, path))
+    def backup_file_implementation(self, config, path) -> List[BackupReport]:
+        """Copy path under the configured directory.
+
+        Args:
+            config (CollectorConfiguration): ingestion config
+            path (str): local file path on the pod working directory
+
+        Returns:
+            list[BackupReport]: a single report
+        """
+        local_file_path = "/".join(self.get_backup_path(config, path))
+
+        with self.report_transfer(
+            config, path, self.args.directory, local_file_path
+        ) as report:
+
             parent_folder = os.path.dirname(local_file_path)
 
             # Create the parent folder if it doesn't exist
@@ -32,12 +53,4 @@ class CollectorBackupLocal(CollectorBackup):
             )
             shutil.copy2(path, local_file_path)
 
-        except IOError as error:
-
-            self.logger.critical(
-                "Cannot backup file %s to %s on localfilesystem %s due to the following error: %s",
-                path,
-                self.args.interface_name,
-                self.args.directory,
-                error,
-            )
+        return [report]

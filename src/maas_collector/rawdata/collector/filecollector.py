@@ -27,6 +27,7 @@ from maas_model import MAASRawDocument, MAASMessage
 from maas_collector.health import health
 from maas_collector.health.serverthread import ServerThread
 
+from maas_collector.rawdata.backup_report import BackupReportWriter
 from maas_collector.rawdata.model import ActionIterator
 from maas_collector.rawdata import extractor
 from maas_collector.rawdata.configuration import (
@@ -135,6 +136,14 @@ class FileCollectorConfiguration:
     store_meta: list = None
 
     backup: CollectorBackupConfiguration = None
+
+    backup_report_model: typing.Any = dataclasses.field(default=None, init=False)
+    """model class storing the backup transfer reports of this configuration.
+
+    Resolved by load_config from backup["report_model"], never read from the
+    JSON directly: init=False makes a configuration file trying to set it fail
+    loudly instead of quietly bypassing resolution.
+    """
 
     @cached_property
     def name(self) -> str:
@@ -347,6 +356,32 @@ class FileCollector(CredentialMixin):
                     config.model = get_model(config.model)
             else:
                 self.logger.debug("No model declared in config %s", config)
+
+        # resolve the model storing the backup reports, when a backup block asks
+        # for them. Done here and not earlier because load_json registers models
+        # after configurations, so a model declared in one file has to be visible
+        # to a backup block declared in another.
+        for config in self.configs:
+            if not isinstance(config.backup, dict):
+                continue
+
+            report_model_name = config.backup.get("report_model")
+
+            if not report_model_name:
+                self.logger.debug(
+                    "No backup report model declared in config %s:"
+                    " backup reporting is off",
+                    config.name,
+                )
+                continue
+
+            self.logger.info(
+                "Resolving backup report model class: %s", report_model_name
+            )
+
+            # get_model raises KeyError on an unknown name: failing at startup
+            # like config.model does beats failing on the first backed up file
+            config.backup_report_model = get_model(report_model_name)
 
         # handle optionnal credential file
         if self.args.credential_file:
@@ -569,16 +604,63 @@ class FileCollector(CredentialMixin):
 
             # Should we backup all ?
             if config.backup:
-
-                self._backup = instanciate_collector_backup(config.backup)
-                self._backup.backup_file(config, path)
-
-                # handle meta
-                if IngestionMeta.has_meta_file(path):
-                    self._backup.backup_file(config, IngestionMeta.get_meta_path(path))
+                self.backup_and_report(config, path, report_name, report_folder)
 
             self.action_iterator_errors = self._action_iterator.action_iterator_errors
             self._action_iterator = None
+
+    def backup_and_report(
+        self, config, path: str, report_name: str = "", report_folder: str = ""
+    ) -> None:
+        """backup an ingested file and store one report per transfer.
+
+        Called from the finally block of extract_from_file, so it must never raise:
+        an exception here would replace the exception the ingestion is already
+        unwinding with, and would leave self._action_iterator dangling for the
+        next file.
+
+        Args:
+            config (FileCollectorConfiguration): ingestion config
+            path (str): local path of the ingested file
+            report_name (str): name of the ingested file
+            report_folder (str): folder of the ingested file
+        """
+        reports = []
+
+        try:
+            self._backup = instanciate_collector_backup(config.backup)
+
+            reports.extend(self._backup.backup_file(config, path))
+
+            # handle meta
+            if IngestionMeta.has_meta_file(path):
+                reports.extend(
+                    self._backup.backup_file(config, IngestionMeta.get_meta_path(path))
+                )
+
+        # catch broad exception to not break the ingestion loop
+        # pylint: disable=W0703
+        except Exception as error:
+            self.logger.error("Cannot backup %s", path)
+            self.logger.exception(error)
+        # pylint: enable=W0703
+
+        if not reports or config.backup_report_model is None:
+            return
+
+        try:
+            BackupReportWriter(config.backup_report_model).write(
+                reports, report_name=report_name, report_folder=report_folder
+            )
+
+        # catch broad exception: failing to report is not failing to ingest
+        # pylint: disable=W0703
+        except Exception as error:
+            self.logger.error(
+                "Cannot store %d backup report(s) of %s", len(reports), path
+            )
+            self.logger.exception(error)
+        # pylint: enable=W0703
 
     def ingest(
         self,

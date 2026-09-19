@@ -1,0 +1,33 @@
+{
+    "models": [
+        {
+            "index": "raw-data-backup",
+            "name": "Backup",
+            "fields": [
+                { "name": "filename", "type": "Keyword" },
+                { "name": "source_filename", "type": "Keyword" },
+                { "name": "source_path", "type": "Keyword" },
+                { "name": "size_bytes", "type": "Long" },
+                { "name": "compressed", "type": "Boolean" },
+                { "name": "backup_type", "type": "Keyword" },
+                { "name": "destination", "type": "Keyword" },
+                { "name": "destination_path", "type": "Keyword" },
+                { "name": "interface_name", "type": "Keyword" },
+                { "name": "model_name", "type": "Keyword" },
+                { "name": "start_time", "type": "Date" },
+                { "name": "end_time", "type": "Date" },
+                { "name": "duration", "type": "Float" },
+                { "name": "status", "type": "Keyword" },
+                { "name": "error_type", "type": "Keyword" },
+                { "name": "details", "type": "Text" }
+            ],
+            "partition_field": "ingestionTime",
+            "partition_format": "%Y"
+        },
+        {
+            "fields": [],
+            "index": "",
+            "name": "BackedUpModel"
+        }
+    ]
+}

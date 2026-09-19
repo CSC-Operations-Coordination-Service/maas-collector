@@ -1,0 +1,21 @@
+{
+    "collectors": [
+        {
+            "id_field": "",
+            "routing_key": "",
+            "interface_name": "BACKED_UP",
+            "model": "BackedUpModel",
+            "extractor": {
+                "class": "LogExtractor",
+                "args": {
+                    "pattern": ".*"
+                }
+            },
+            "backup": {
+                "type": "BackupLocal",
+                "directory": "/tmp/maas-collector-test-backup",
+                "report_model": "Backup"
+            }
+        }
+    ]
+}
