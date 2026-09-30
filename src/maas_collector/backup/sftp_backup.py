@@ -1,11 +1,20 @@
-from maas_collector.backup.backup import CollectorBackupConfiguration, CollectorBackup
+from typing import List
+
 import paramiko
+
+from maas_collector.backup.backup import (
+    BackupReport,
+    CollectorBackup,
+    CollectorBackupConfiguration,
+)
 
 
 class CollectorBackupSFTP(CollectorBackup):
     """store ingested files to an stfp server"""
 
     CONFIGURATION_CLASS = CollectorBackupConfiguration
+
+    TRANSFER_ERRORS = (paramiko.SSHException, OSError)
 
     def __init__(self, args: CollectorBackupConfiguration):
         raise NotImplementedError()
@@ -77,27 +86,30 @@ class CollectorBackupSFTP(CollectorBackup):
 
             self._created_directories.append(subdir)
 
-    def backup_file_implementation(self, config, path):
+    def backup_file_implementation(self, config, path) -> List[BackupReport]:
         """Copy file to backup space
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
-        """
 
-        try:
+        Returns:
+            list[BackupReport]: a single report
+        """
+        target_dir, target_path = self.get_backup_path(config, path)
+
+        target = "/".join([target_dir, target_path])
+
+        with self.report_transfer(config, path, self.args.host, target) as report:
+
             # TODO may be retry n times
             with paramiko.SFTPClient.from_transport(self.transport) as client:
-
-                target_dir, target_path = self.get_backup_path(config, path)
 
                 self.logger.debug("Backuping %s to %s", path, target_path)
 
                 if target_dir not in self._created_directories:
 
                     self.makedirs(client, target_dir)
-
-                target = "/".join([target_dir, target_path])
 
                 tmp_target = "/".join([target_dir, f".{target_path}"])
 
@@ -109,11 +121,12 @@ class CollectorBackupSFTP(CollectorBackup):
 
                 client.posix_rename(tmp_target, target)
 
-        except (paramiko.SSHException, IOError, OSError) as error:
-            self.logger.critical("Cannot backup file %s to %s", path, self.args.host)
-            self.logger.exception(error)
-            # do not raise as logging critical is the only thing to do to not break
-            # the ingestion loop
+        return [report]
+
+    @property
+    def destinations(self) -> List[str]:
+        """override: an sftp backup has a single destination host"""
+        return [self.args.host]
 
     def close(self):
         """close transport and clear directory creation cache"""

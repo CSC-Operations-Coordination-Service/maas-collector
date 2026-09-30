@@ -7,6 +7,7 @@ from argparse import Action, ArgumentParser, Namespace
 
 import maas_collector
 
+from maas_collector.queues.queues import DEFAULT_PUBLISH_EXCHANGE_NAME
 from maas_collector.rawdata.replay import ReplayArgs
 
 
@@ -162,6 +163,17 @@ def amqp_parser() -> ArgumentParser:
         required=False,
         default=5,
         type=int,
+    )
+    parser.add_argument(
+        "--amqp-exchange",
+        dest="amqp_exchange",
+        help="AMQP exchange messages are published to (default: %(default)s). "
+        "A collector configuration can override it with its 'exchange_name' key",
+        action=EnvDefault,
+        envvar="AMQP_EXCHANGE",
+        required=False,
+        default=DEFAULT_PUBLISH_EXCHANGE_NAME,
+        type=str,
     )
     return parser
 
@@ -896,6 +908,40 @@ def replay_parser() -> ArgumentParser:
     return parser
 
 
+def disclaimer_parser():
+    """SAR-MPC Quality Disclaimer CLI argument parser factory
+
+    Returns:
+        ArgumentParser: Disclaimer argument parser
+
+    """
+    parser = ArgumentParser(add_help=False)
+
+    parser.add_argument(
+        "--disclaimer-timeout",
+        dest="disclaimer_timeout",
+        help="Default timeout (default: %(default)s)",
+        action=EnvDefault,
+        envvar="DISCLAIMER_TIMEOUT",
+        required=False,
+        type=int,
+        default=120,
+    )
+
+    parser.add_argument(
+        "--disclaimer-keep-files",
+        dest="disclaimer_keep_files",
+        help="Keep downloaded api pages (default: %(default)s)",
+        action=EnvDefault,
+        envvar="DISCLAIMER_KEEP_FILES",
+        required=False,
+        type=bool,
+        default=False,
+    )
+
+    return parser
+
+
 def common_parser() -> ArgumentParser:
     """common cli parser factory
 
@@ -1070,6 +1116,7 @@ def get_collector_args(classobj, namespace, **kwargs):
         force_message=namespace.force_message,
         credential_file=namespace.credential_file,
         amqp_priority=namespace.amqp_priority,
+        amqp_exchange=namespace.amqp_exchange,
         **kwargs,
     )
 

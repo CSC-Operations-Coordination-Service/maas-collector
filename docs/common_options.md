@@ -50,6 +50,45 @@ maas-collector notifies database updates with messages sent over an AMQP impleme
 | --amqp-url      | AMQP_URL             | AMQP cluster URL (default: amqp://localhost:5672//)           |
 | --amqp-retries  | AMQP_RETRIES         | AMQP number of retries (default: 0). 0 for infinite           |
 | --amqp-priority | AMQP_PRIORITY        | AMQP message priority (default: 5). Higher is higher priority |
+| --amqp-exchange | AMQP_EXCHANGE        | Exchange messages are published to (default: collect-exchange) |
+
+#### Choosing the destination exchange
+
+A message is dispatched by two values: the **exchange** it is published to, and
+the **routing key** consumers bind their queues with.
+
+`--amqp-exchange` sets the exchange for the whole process. A single collector can
+also ventilate its messages over several exchanges, because a collector
+configuration entry may name its own with the `exchange_name` key:
+
+```json
+{
+  "collectors": [
+    {
+      "interface_name": "CDSE_S1_OCN",
+      "routing_key": "new.raw.data.cdse-product",
+      "exchange_name": "etl-exchange"
+    }
+  ]
+}
+```
+
+The most specific setting wins:
+
+| `exchange_name` on the configuration | `--amqp-exchange` / `AMQP_EXCHANGE` | Destination |
+| --- | --- | --- |
+| set | anything | the configuration value |
+| unset | set | the process value |
+| unset | unset | `collect-exchange` |
+
+Every exchange is declared as a **durable topic** exchange, once, the first time
+a message goes to it. An entry with an empty `routing_key` still publishes
+nothing at all, whatever its exchange.
+
+> Messages are published with `mandatory=True`, so one sent to an exchange where
+> no queue is bound to its routing key comes back to the collector and is logged
+> as `AMQP exchange <name> has no route for <routing key>`, then dropped. Bind
+> the consumer queue before starting the collector.
 
 ### Database options
 
