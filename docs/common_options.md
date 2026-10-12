@@ -14,9 +14,20 @@ All collectors implementations support the options detailed in the next subsecti
 | -v, --verbose       |                      | Activate verbose mode                   |
 | -vv, --very-verbose |                      | set loglevel to DEBUG                   |
 | --working-directory | WORKING_DIRECTORY    | Directory for downloads (default: /tmp) |
-| --credential-file   | CREDENTIAL_FILE      | Credential file (default: None)         |
 
 > By default, only warnings and errors are reported on the standard output, you can use `-v` option for a reasonable amount of logs.
+
+### Credential options
+
+Credentials are read from a JSON file by default, or from OpenBao / HashiCorp Vault, see [Vault credentials](vault.md).
+
+| CLI option                  | Environment variable      | Description                                                                     |
+| --------------------------- | ------------------------- | ------------------------------------------------------------------------------- |
+| --credential-file           | CREDENTIAL_FILE           | Credential file (default: None)                                                 |
+| --credential-backend        | CREDENTIAL_BACKEND        | Where credentials are read from: `file` or `vault` (default: file)              |
+| --credential-refresh-period | CREDENTIAL_REFRESH_PERIOD | Seconds between two reads of the credentials, 0 for startup only (default: 300) |
+
+> The `VAULT_*` options are detailed in [Vault credentials](vault.md).
 
 ### Ingestion options
 

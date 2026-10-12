@@ -81,6 +81,9 @@ class InterfaceMeta:
 
     probe_callable: Callable = lambda: True
 
+    # collector class of the probed interface, None for extra http probes
+    collector_class: type | None = None
+
     retrying: bool = False
 
     retry_count: int = 0
@@ -370,7 +373,11 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
                 f" with name {self.monitor_config.interface_name}"
             )
 
-        credential_dict = self.load_credential_dict(self.args.credential_file)
+        # probing the interfaces requires their credentials
+        if self.credential_provider is None:
+            raise ValueError(
+                "No credential source: set CREDENTIAL_FILE or CREDENTIAL_BACKEND"
+            )
 
         meta_list: List[InterfaceMeta] = []
 
@@ -413,19 +420,12 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
                     )
                     continue
 
-                self.logger.debug("Applying credentials to %s", config.interface_name)
-
-                try:
-                    self.set_credential_attributes(config, credential_dict)
-                except KeyError as error:
-                    self.logger.warning(error)
-                    continue
-
                 interface_meta = InterfaceMeta(
                     name=collect_conf_dict["interface_name"],
                     configuration_path=config_path,
                     config=config,
                     probe_callable=collector_class.probe,
+                    collector_class=collector_class,
                 )
 
                 meta_list.append(interface_meta)
@@ -448,8 +448,35 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         self.meta_dict = {meta.name: meta for meta in meta_list}
 
+        # read the credentials again, now for the probed interfaces too
+        self.load_credentials()
+
         self.ko_manager = KOManagerThread(self.configs[0])
         self.ko_manager.start()
+
+    def credential_targets(self) -> list:
+        """the monitoring configuration and the configurations of the probed
+        interfaces
+
+        Returns:
+            list: configurations
+        """
+        return self.configs + [
+            meta.config for meta in self.meta_dict.values() if meta.config is not None
+        ]
+
+    def on_credentials_changed(self, interface_names: list):
+        """the probed collector classes may cache authentication built from the
+        previous credentials
+
+        Args:
+            interface_names (list): names of the interfaces
+        """
+        for interface_name in interface_names:
+            meta = self.meta_dict.get(interface_name)
+
+            if meta is not None and meta.collector_class is not None:
+                meta.collector_class.clear_cached_credentials([interface_name])
 
     def ingest(self, path=None, configs=None, force_update=None):
         """Ingest from SFTP. All arguments are ignored so defaults to None

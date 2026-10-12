@@ -211,6 +211,16 @@ class ODataCollector(HttpCollector, HttpMixin):
 
     IMPL_DIR = {"v3": ODataQueryV3Implementation, "v4": ODataQueryV4Implementation}
 
+    @classmethod
+    def clear_cached_credentials(cls, interface_names: list):
+        """drop the probe authentications built from the previous credentials
+
+        Args:
+            interface_names (list): names of the interfaces
+        """
+        for interface_name in interface_names:
+            cls.__auth_cache.pop(interface_name, None)
+
     def ingest_all_interfaces(self):
         """Nominal ingestion from OData: collect all the OData configurations"""
         # iterate over all OData collector configurations
@@ -541,12 +551,14 @@ class ODataCollector(HttpCollector, HttpMixin):
             http_session.mount("http://", HTTPAdapter(max_retries=retry))
             http_session.mount("https://", HTTPAdapter(max_retries=retry))
 
-            if config.interface_name not in cls.__auth_cache:
-                cls.__auth_cache[config.interface_name] = build_authentication(
+            # single lookup: a credential refresh may evict the entry meanwhile
+            authentication = cls.__auth_cache.get(config.interface_name)
+
+            if authentication is None:
+                authentication = build_authentication(
                     config.auth_method, config, http_session
                 )
-
-            authentication = cls.__auth_cache[config.interface_name]
+                cls.__auth_cache[config.interface_name] = authentication
 
             headers = authentication.get_headers()
 

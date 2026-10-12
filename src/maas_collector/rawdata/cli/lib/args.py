@@ -8,6 +8,7 @@ from argparse import Action, ArgumentParser, Namespace
 import maas_collector
 
 from maas_collector.queues.queues import DEFAULT_PUBLISH_EXCHANGE_NAME
+from maas_collector.rawdata.collector.credentialprovider import VaultArgs
 from maas_collector.rawdata.replay import ReplayArgs
 
 
@@ -942,6 +943,116 @@ def disclaimer_parser():
     return parser
 
 
+def vault_parser() -> ArgumentParser:
+    """OpenBao / HashiCorp Vault credential source CLI argument parser factory
+
+    Returns:
+        ArgumentParser: vault argument parser
+    """
+    parser = ArgumentParser(add_help=False)
+
+    parser.add_argument(
+        "--vault-addr",
+        dest="vault_addr",
+        help="Vault address, like https://vault:8200 (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_ADDR",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-kv-mount",
+        dest="vault_kv_mount",
+        help="Mount point of the KV version 2 secret engine (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_KV_MOUNT",
+        required=False,
+        default="secret",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-path-prefix",
+        dest="vault_path_prefix",
+        help="Path of the credential secrets in the engine (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_PATH_PREFIX",
+        required=False,
+        default="maas-collector",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-auth-method",
+        dest="vault_auth_method",
+        help="Vault authentication method (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_AUTH_METHOD",
+        required=False,
+        default="approle",
+        type=str,
+        choices=["approle", "token"],
+    )
+
+    parser.add_argument(
+        "--vault-role-id",
+        dest="vault_role_id",
+        help="AppRole role id (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_ROLE_ID",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-secret-id-file",
+        dest="vault_secret_id_file",
+        help="File holding the AppRole secret id (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_SECRET_ID_FILE",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-token-file",
+        dest="vault_token_file",
+        help="File holding the vault token for the token authentication method,"
+        " VAULT_TOKEN is used without it (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_TOKEN_FILE",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    return parser
+
+
+def get_vault_args(namespace: Namespace) -> VaultArgs:
+    """VaultArgs factory
+
+    Args:
+        namespace (Namespace): parsed arguments
+
+    Returns:
+        VaultArgs: vault settings
+    """
+    return VaultArgs(
+        url=namespace.vault_addr,
+        kv_mount=namespace.vault_kv_mount,
+        path_prefix=namespace.vault_path_prefix,
+        auth_method=namespace.vault_auth_method,
+        role_id=namespace.vault_role_id,
+        secret_id_file=namespace.vault_secret_id_file,
+        token_file=namespace.vault_token_file,
+    )
+
+
 def common_parser() -> ArgumentParser:
     """common cli parser factory
 
@@ -957,6 +1068,7 @@ def common_parser() -> ArgumentParser:
             backup_parser_s3(),
             backup_parser_sftp(),
             replay_parser(),
+            vault_parser(),
         ],
     )
 
@@ -1085,6 +1197,31 @@ def common_parser() -> ArgumentParser:
         type=str,
     )
 
+    parser.add_argument(
+        "--credential-backend",
+        dest="credential_backend",
+        help="Where credentials are read from: file (--credential-file) or vault"
+        " (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CREDENTIAL_BACKEND",
+        required=False,
+        default="file",
+        type=str,
+        choices=["file", "vault"],
+    )
+
+    parser.add_argument(
+        "--credential-refresh-period",
+        dest="credential_refresh_period",
+        help="Seconds between two reads of the credentials, 0 reads them only at"
+        " startup (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CREDENTIAL_REFRESH_PERIOD",
+        required=False,
+        type=int,
+        default=300,
+    )
+
     return parser
 
 
@@ -1115,6 +1252,9 @@ def get_collector_args(classobj, namespace, **kwargs):
         amqp_retries=namespace.amqp_retries,
         force_message=namespace.force_message,
         credential_file=namespace.credential_file,
+        credential_backend=namespace.credential_backend,
+        credential_refresh_period=namespace.credential_refresh_period,
+        vault=get_vault_args(namespace),
         amqp_priority=namespace.amqp_priority,
         amqp_exchange=namespace.amqp_exchange,
         **kwargs,
