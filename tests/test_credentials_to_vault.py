@@ -59,3 +59,13 @@ def test_dry_run_writes_nothing_and_prints_no_value(fake_vault):
     assert "secret/maas-collector/common_cred" in result.stdout
     assert "client_password" in result.stdout
     assert "my_super_password" not in result.stdout + result.stderr
+
+
+def test_mount_and_prefix_default_to_the_collector_settings(fake_vault, monkeypatch):
+    monkeypatch.setenv("VAULT_KV_MOUNT", "kv")
+    monkeypatch.setenv("VAULT_PATH_PREFIX", "maas-collector/cds")
+
+    result = run_script(fake_vault)
+
+    assert "wrote kv/maas-collector/cds/common_cred" in result.stdout
+    assert "kv/maas-collector/cds/common_cred" in fake_vault.secrets

@@ -35,14 +35,16 @@ def main(argv: list) -> int:
 
     parser.add_argument(
         "--kv-mount",
-        default="secret",
-        help="mount point of the KV version 2 engine (default: %(default)s)",
+        default=os.environ.get("VAULT_KV_MOUNT", "secret"),
+        help="mount point of the KV version 2 engine"
+        " (default: VAULT_KV_MOUNT or %(default)s)",
     )
 
     parser.add_argument(
         "--path-prefix",
-        default="maas-collector",
-        help="path of the credential secrets in the engine (default: %(default)s)",
+        default=os.environ.get("VAULT_PATH_PREFIX", "maas-collector"),
+        help="path of the credential secrets in the engine"
+        " (default: VAULT_PATH_PREFIX or %(default)s)",
     )
 
     parser.add_argument(

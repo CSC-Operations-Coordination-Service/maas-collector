@@ -52,12 +52,12 @@ class CredentialProvider(abc.ABC):
 - Call `self.refresh_credentials()` in `FileCollector.run()` (`filecollector.py:792-797`), right before `self.on_loop_start()`. It is called there rather than inside `on_loop_start`, so a subclass that overrides the template cannot skip it. It runs on the main thread between loops, so it never races with the monitor's `ThreadPool` probes.
 
 **Why the rest needs no work:** FTP, ROSFTP, S3, JIRA, HTTP/OAuth, WebDAV and MPIP clients are all rebuilt from the config at each loop (see the exploration notes), so mutating the config in place is enough. Two exceptions:
-- **`ODataCollector.__auth_cache`** (`odatacollector.py:208,544-549`): a class-level auth cache that never expires, used by `probe()`. Override `on_credentials_changed` as a classmethod hook that pops the changed interface names.
+- ~~**`ODataCollector.__auth_cache`**: override `on_credentials_changed` to evict the changed interfaces.~~ Dropped after review: the cache only serves `probe_item`, which only maas-cds calls. The monitor probes through `HttpCollector.probe`, which builds the authentication at each call.
 - **`InterfaceMonitor`** (`monitorcollector.py:373,416-422`):
   - Replace its direct `load_credential_dict(self.args.credential_file)` call with the provider.
   - Override `credential_targets()` to return `[meta.config for meta in self.meta_dict.values()]` plus `self.configs`.
-  - On change, call the probed collector class's `on_credentials_changed`. Add `collector_class` to `InterfaceMeta` for this.
-  - Make the missing-entry case actually skip the interface. Today `set_credential_attributes` never raises the `KeyError` that the monitor catches.
+  - ~~On change, call the probed collector class's `on_credentials_changed`.~~ Dropped with the OData cache hook.
+  - ~~Make the missing-entry case actually skip the interface.~~ Not done, deliberately: the monitor keeps probing an interface without a credential entry, as some interfaces need no credentials. The dead `KeyError` handling is removed instead.
 
 ### 3. Settings: [args.py](src/maas_collector/rawdata/cli/lib/args.py) `common_parser()` and `CollectorArgs`
 
@@ -105,8 +105,8 @@ Each option is set by a CLI flag or an env var through `EnvDefault`, next to `--
 - **Modified:**
   - `credentialmixin.py`: provider, snapshot, `refresh_credentials`, `credential_targets`, `on_credentials_changed`
   - `filecollector.py`: `CollectorArgs` fields, `refresh_credentials()` call in `run()`, `load_config` via the provider
-  - `monitorcollector.py`: provider, `credential_targets`, `InterfaceMeta.collector_class`
-  - `odatacollector.py`: `on_credentials_changed` evicts `__auth_cache`
+  - `monitorcollector.py`: provider, `credential_targets`
+  - ~~`odatacollector.py`: `on_credentials_changed` evicts `__auth_cache`~~ (dropped after review)
   - `cli/lib/args.py`: new options
   - `setup.cfg`: `hvac`
   - `docs/common_options.md`

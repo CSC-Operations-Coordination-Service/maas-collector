@@ -36,8 +36,10 @@ becomes the secret `secret/maas-collector/cds/common_cred`, when
 `VAULT_PATH_PREFIX` is `maas-collector/cds`:
 
 ```shell
+# client_password=- reads the password from stdin, so it stays out of the shell
+# history and of the process list
 bao kv put -mount=secret maas-collector/cds/common_cred \
-    auth_method=Basic client_username=collector client_password=s3cr3t
+    auth_method=Basic client_username=collector client_password=-
 ```
 
 The `vault` CLI takes the same commands as `bao`.
@@ -102,7 +104,11 @@ is `cds`.
    - The collector logs in again whenever its token expires. Each login uses the
      secret id, so leave `secret_id_num_uses` at 0 (no limit).
    - Set `secret_id_ttl` if your policy requires it. When the secret id expires,
-     the collectors fail at their next login, so renew it before then.
+     the collectors fail at their next login, so renew it before then. The
+     collectors read the secret id file at each login, but a Swarm secret cannot
+     change: a new secret id is a new Swarm secret, swapped in with
+     `docker service update --secret-rm ... --secret-add ...`, which restarts the
+     collectors.
    - `secret_id_bound_cidrs` and `token_bound_cidrs` restrict where the secret id
      and the tokens can be used.
 
@@ -115,7 +121,9 @@ is `cds`.
        | docker secret create maas_collector_cds_vault_secret_id -
    ```
 
-The secret id is now the only secret the stack holds. It only reads that stack's
+The secret id replaces the credential file. Once the
+[OpenSearch and AMQP connections](#opensearch-and-amqp-connections) come from the
+vault too, it is the only secret the stack holds. It only reads that stack's
 credentials, it can be revoked, and the vault audit log records every read.
 
 ## Deploying a collector
@@ -131,6 +139,8 @@ services:
       VAULT_PATH_PREFIX: maas-collector/cds
       VAULT_ROLE_ID: <role id>
       VAULT_SECRET_ID_FILE: /run/secrets/maas_collector_cds_vault_secret_id
+      NO_PROXY: bao.internal
+      no_proxy: bao.internal
     secrets:
       - maas_collector_cds_vault_secret_id
       - vault_ca
@@ -141,6 +151,11 @@ secrets:
   vault_ca:
     external: true
 ```
+
+The vault client honours the `https_proxy` and `http_proxy` variables. When the
+collectors reach the internet through a proxy, list the vault host in `NO_PROXY`
+and `no_proxy`: an egress proxy usually refuses port 8200, and the collectors would
+then fail at startup with a `ProxyError`.
 
 The interface monitor reads the credentials of every interface it probes, so its
 policy has to cover them too.
@@ -167,10 +182,11 @@ Each secret holds `url`, and `username` and `password` when the service needs
 authentication:
 
 ```shell
+# password=- reads the password from stdin
 bao kv put -mount=secret maas/cds/opensearch \
-    url=https://opensearch.internal:9200 username=maas password=...
+    url=https://opensearch.internal:9200 username=maas password=-
 bao kv put -mount=secret maas/cds/amqp \
-    url=amqp://rabbitmq.internal:5672// username=maas password=...
+    url=amqp://rabbitmq.internal:5672// username=maas password=-
 ```
 
 Give every AppRole of the stack, collectors and maas-engine alike, a policy to read
@@ -199,6 +215,8 @@ Then replace the connection variables of the service:
       VAULT_ADDR: https://bao.internal:8200
       VAULT_ROLE_ID: <role id>
       VAULT_SECRET_ID_FILE: /run/secrets/maas_collector_cds_vault_secret_id
+      NO_PROXY: bao.internal
+      no_proxy: bao.internal
 ```
 
 - The connections are read **once, at startup**. To rotate a password, write a new
@@ -214,7 +232,8 @@ Then replace the connection variables of the service:
 
 `scripts/credentials_to_vault.py` writes each entry of a credential file as a
 secret. It authenticates with `VAULT_TOKEN`, a token allowed to write under the
-prefix. Like every script of the folder, it needs an environment where
+prefix. `--kv-mount` and `--path-prefix` default to `VAULT_KV_MOUNT` and
+`VAULT_PATH_PREFIX`. Like every script of the folder, it needs an environment where
 maas-collector is installed. It prints entry and attribute names, never values.
 
 ```shell
@@ -238,20 +257,24 @@ python scripts/credentials_to_vault.py maas-api-collector-credentials.json \
 Write a new version of the secret:
 
 ```shell
-bao kv patch -mount=secret maas-collector/cds/common_cred client_password=n3w
+bao kv patch -mount=secret maas-collector/cds/common_cred client_password=-
 ```
 
 Collectors read the credentials again at the start of their first loop after
 `CREDENTIAL_REFRESH_PERIOD` seconds, so a change is used within about
-`CREDENTIAL_REFRESH_PERIOD` plus `WATCH_PERIOD`. When a collector picks it up, it
-logs the names of the entries that changed, never their values:
-`Credentials changed for common_cred`.
+`CREDENTIAL_REFRESH_PERIOD` plus `WATCH_PERIOD` plus the duration of the current
+loop. A replay also reads them before each retry. When a collector picks a change
+up, it logs the names of the entries that changed, never their values:
+`Credentials changed for common_cred`. Changes to entries the collector does not use
+are ignored.
 
 - Every interface sharing the entry gets the new values.
 - Clients and OAuth tokens are created again from the new values at the next
   collect, including the monitor probe authentications.
-- An attribute **removed** from an entry keeps its previous value until the
-  collector restarts. A warning tells which one.
+- An attribute **removed** from an entry, or from a deleted entry, keeps its
+  previous value until the collector restarts. A warning tells which one. When an
+  interface's own entry is deleted, the shared entry's values apply, as after a
+  restart.
 
 The same refresh applies to the credential file backend, when the file changes in
 place.
@@ -259,11 +282,19 @@ place.
 ## When the vault is unavailable
 
 - **At startup**, the collector stops with an error, as it does when the credential
-  file is missing.
+  file is missing. It also stops when the vault policy denies one of its entries.
+- **At startup, when none of the entries is found**, the collector logs an error
+  naming `VAULT_KV_MOUNT` and `VAULT_PATH_PREFIX`, the usual culprits, and starts
+  without credentials. It does not stop, as collectors without credentials may share
+  these settings.
 - **During a refresh**, the collector logs the error and keeps collecting with the
-  credentials it already has. It tries again at its next loop.
+  credentials it already has. It tries again at its next loop. The first failure
+  logs a traceback, the next ones a single line.
+- **An entry the policy no longer covers** keeps its current values, with a warning
+  at each refresh. The other entries are still refreshed.
 - **An expired token** makes the collector log in again with its secret id, then
-  read again once.
+  read again once. A token that is still valid but refused by the policy does not
+  cause a new login.
 
 ## Trying it locally
 
