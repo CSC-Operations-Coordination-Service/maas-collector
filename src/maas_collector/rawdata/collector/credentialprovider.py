@@ -13,34 +13,17 @@ import logging
 import os
 import typing
 
-import hvac
+from maas_model.vault import VaultClient, VaultSettings
 
 LOGGER = logging.getLogger("CredentialProvider")
 
 
 @dataclasses.dataclass
-class VaultArgs:
-    """OpenBao / HashiCorp Vault connection settings"""
-
-    url: str = ""
-
-    # mount point of the KV version 2 secret engine
-    kv_mount: str = "secret"
+class VaultArgs(VaultSettings):
+    """OpenBao / HashiCorp Vault settings of the collectors"""
 
     # each credential entry is the secret <kv_mount>/<path_prefix>/<entry name>
     path_prefix: str = "maas-collector"
-
-    # approle or token
-    auth_method: str = "approle"
-
-    role_id: str = ""
-
-    # file holding the AppRole secret id, typically a Swarm secret
-    secret_id_file: str = ""
-
-    # file holding a token for the token auth method. Without it the token is
-    # taken from VAULT_TOKEN
-    token_file: str = ""
 
 
 class CredentialProvider(abc.ABC):
@@ -90,12 +73,6 @@ class FileCredentialProvider(CredentialProvider):
         return credential_dict
 
 
-def read_secret_file(path: str) -> str:
-    """Read a secret stored alone in a file, without the trailing new line"""
-    with open(path, encoding="UTF-8") as secret_fd:
-        return secret_fd.read().strip()
-
-
 class VaultCredentialProvider(CredentialProvider):
     """Credentials from an OpenBao or HashiCorp Vault KV version 2 engine.
 
@@ -103,78 +80,21 @@ class VaultCredentialProvider(CredentialProvider):
     same attributes as an entry of the credential file.
     """
 
-    AUTH_METHODS = ("approle", "token")
-
     def __init__(self, args: VaultArgs):
-        if not args.url:
-            raise ValueError("Vault credentials need a vault address: set VAULT_ADDR")
-
-        if args.auth_method not in self.AUTH_METHODS:
-            raise ValueError(
-                f"Unknown VAULT_AUTH_METHOD {args.auth_method}:"
-                f" expected one of {', '.join(self.AUTH_METHODS)}"
-            )
-
-        if args.auth_method == "approle":
-            if not args.role_id:
-                raise ValueError("Vault AppRole authentication needs VAULT_ROLE_ID")
-
-            if not args.secret_id_file:
-                raise ValueError(
-                    "Vault AppRole authentication needs VAULT_SECRET_ID_FILE"
-                )
-
         self.args = args
 
-        # TLS verification follows VAULT_CACERT / VAULT_CAPATH like the vault CLI
-        self.client = hvac.Client(url=args.url)
-
-        self._logged_in = False
-
-    def login(self):
-        """Get a new vault token"""
-        if self.args.auth_method == "approle":
-            LOGGER.info("Logging in to %s with AppRole", self.args.url)
-            # read at each login so a new secret id is used without restart
-            self.client.auth.approle.login(
-                role_id=self.args.role_id,
-                secret_id=read_secret_file(self.args.secret_id_file),
-            )
-        elif self.args.token_file:
-            self.client.token = read_secret_file(self.args.token_file)
-
-        self._logged_in = True
+        self.client = VaultClient(args)
 
     def load(self, names: typing.Iterable[str]) -> dict:
-        if not self._logged_in:
-            self.login()
-
-        try:
-            return self._read_entries(names)
-
-        except hvac.exceptions.Forbidden:
-            # most of the time the token expired. Retry once with a new one
-            LOGGER.info("Vault refused the token, logging in again")
-            self.login()
-            return self._read_entries(names)
-
-    def _read_entries(self, names: typing.Iterable[str]) -> dict:
         entries = {}
 
         for name in sorted(names):
             path = f"{self.args.path_prefix}/{name}" if self.args.path_prefix else name
 
-            try:
-                response = self.client.secrets.kv.v2.read_secret_version(
-                    path=path,
-                    mount_point=self.args.kv_mount,
-                    raise_on_deleted_version=True,
-                )
-            except hvac.exceptions.InvalidPath:
-                LOGGER.debug("No vault secret %s/%s", self.args.kv_mount, path)
-                continue
+            secret = self.client.read_secret(path)
 
-            entries[name] = response["data"]["data"]
+            if secret is not None:
+                entries[name] = secret
 
         return entries
 

@@ -14,7 +14,7 @@ from opensearchpy.connection.connections import connections as es_connections
 import pytest
 from requests.exceptions import ConnectionError as RequestConnectionError
 
-from fakevault import FakeVault
+from maas_model.testing.fakevault import FakeVault
 
 
 @pytest.fixture
