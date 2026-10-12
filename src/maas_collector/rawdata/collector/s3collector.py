@@ -216,9 +216,15 @@ class S3Collector(FileCollector, HttpMixin):
                 self.get_configuration_by_interface_name(interface_name)
             )
 
-            self.ingest_interface(
-                journal, self.get_configuration_by_interface_name(interface_name)
-            )
+            try:
+                self.ingest_interface(
+                    journal, self.get_configuration_by_interface_name(interface_name)
+                )
+
+            # catch broad exception so a failing interface does not skip the next ones
+            # pylint: disable=W0703
+            except Exception:
+                self.logger.exception("Cannot collect interface %s", interface_name)
 
             if self.should_stop_loop:
                 break
