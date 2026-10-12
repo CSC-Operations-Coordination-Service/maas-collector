@@ -119,15 +119,35 @@ def test_vault_provider_logs_in_again_when_its_token_expired(fake_vault, vault_a
     assert fake_vault.logins == 2
 
 
-def test_vault_provider_gives_up_after_one_new_login(fake_vault, vault_args):
-    """a policy that denies the read must not end up in a login loop"""
+def test_vault_provider_skips_the_entries_the_policy_denies(
+    fake_vault, vault_args, caplog
+):
+    """one entry the policy no longer covers must not stop reading the others"""
     fake_vault.put("secret", "maas-collector/common_cred", COMMON_CRED)
-    fake_vault.denied.add("secret/maas-collector/common_cred")
+    fake_vault.put("secret", "maas-collector/basic_test", {"client_password": "x"})
+    fake_vault.denied.add("secret/maas-collector/basic_test")
+    provider = VaultCredentialProvider(vault_args)
 
-    with pytest.raises(hvac.exceptions.Forbidden):
-        VaultCredentialProvider(vault_args).load({"common_cred"})
+    entries = provider.load({"common_cred", "basic_test"})
 
-    assert fake_vault.logins == 2
+    assert entries == {"common_cred": COMMON_CRED}
+    assert provider.unreadable == {"basic_test"}
+    assert "basic_test" in caplog.text
+    assert fake_vault.logins == 1
+
+
+def test_vault_provider_forgets_the_entries_denied_by_a_previous_load(
+    fake_vault, vault_args
+):
+    fake_vault.put("secret", "maas-collector/basic_test", {"client_password": "x"})
+    fake_vault.denied.add("secret/maas-collector/basic_test")
+    provider = VaultCredentialProvider(vault_args)
+    provider.load({"basic_test"})
+
+    fake_vault.denied.clear()
+    provider.load({"basic_test"})
+
+    assert not provider.unreadable
 
 
 def test_vault_provider_raises_when_the_secret_id_is_refused(fake_vault, vault_args):

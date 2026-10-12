@@ -76,3 +76,36 @@ def test_replay_still_retries_a_failing_interface():
 
     assert ingest_http.call_count == 2
     journal_class.return_value.complete.assert_called_once()
+
+
+def test_replay_refreshes_the_credentials_before_each_retry():
+    """a replay runs inside one loop: a rotated secret must reach its retries"""
+    collector = make_collector(HttpCollector, ["first"])
+    collector.args = Mock()
+    collector.refresh_credentials = Mock()
+
+    replay_args = ReplayArgs(
+        interface_name=["first"],
+        start_date_arg="2026-01-01T00:00:00Z",
+        end_date_arg="2026-01-02T00:00:00Z",
+        retry=3,
+    )
+
+    module = "maas_collector.rawdata.collector.httpcollector"
+
+    with patch(f"{module}.CollectorReplayJournal") as journal_class, patch(
+        f"{module}.sleep"
+    ), patch.object(
+        HttpCollector,
+        "ingest_http",
+        side_effect=[
+            RequestConnectionError("401"),
+            RequestConnectionError("401"),
+            None,
+        ],
+    ):
+        journal_class.return_value.last_date = None
+
+        collector.ingest_replay(replay_args)
+
+    assert collector.refresh_credentials.call_count == 2

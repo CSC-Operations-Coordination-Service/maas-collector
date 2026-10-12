@@ -234,6 +234,9 @@ class HttpCollector(FileCollector, HttpMixin):
                     self.logger.info("Waiting 10s before retrying the replay")
                     sleep(10)
 
+                    # a replay runs within one loop: pick up rotated credentials
+                    self.refresh_credentials()
+
             if finished_without_errors:
                 self.logger.info(
                     "Completed replay for %s between %s and %s",

@@ -13,6 +13,7 @@ import logging
 import os
 import typing
 
+import hvac
 from maas_model.vault import VaultClient, VaultSettings
 
 LOGGER = logging.getLogger("CredentialProvider")
@@ -28,6 +29,9 @@ class VaultArgs(VaultSettings):
 
 class CredentialProvider(abc.ABC):
     """Source of credential entries"""
+
+    # names of the entries the last load was not allowed to read
+    unreadable: frozenset = frozenset()
 
     @abc.abstractmethod
     def load(self, names: typing.Iterable[str]) -> dict:
@@ -86,15 +90,35 @@ class VaultCredentialProvider(CredentialProvider):
         self.client = VaultClient(args)
 
     def load(self, names: typing.Iterable[str]) -> dict:
+        """Read the requested entries. An entry the vault policy does not allow to
+        read is left out, and listed in unreadable
+
+        Raises:
+            hvac.exceptions.VaultError: when the vault cannot be read
+        """
         entries = {}
+        unreadable = set()
 
         for name in sorted(names):
             path = f"{self.args.path_prefix}/{name}" if self.args.path_prefix else name
 
-            secret = self.client.read_secret(path)
+            try:
+                secret = self.client.read_secret(path)
+            except hvac.exceptions.Forbidden:
+                LOGGER.warning(
+                    "The vault policy does not allow reading the credential entry %s"
+                    " (%s/%s)",
+                    name,
+                    self.args.kv_mount,
+                    path,
+                )
+                unreadable.add(name)
+                continue
 
             if secret is not None:
                 entries[name] = secret
+
+        self.unreadable = frozenset(unreadable)
 
         return entries
 
