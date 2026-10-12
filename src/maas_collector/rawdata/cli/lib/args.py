@@ -8,6 +8,8 @@ from argparse import Action, ArgumentParser, Namespace
 import maas_collector
 
 from maas_collector.queues.queues import DEFAULT_PUBLISH_EXCHANGE_NAME
+from maas_model.vault import ConnectionSettings, VaultClient, read_connection
+
 from maas_collector.rawdata.collector.credentialprovider import VaultArgs
 from maas_collector.rawdata.replay import ReplayArgs
 
@@ -62,6 +64,16 @@ def es_parser() -> ArgumentParser:
         type=str,
     )
     parser.add_argument(
+        "--es-vault-path",
+        dest="es_vault_path",
+        help="Vault secret holding the opensearch url, username and password, in"
+        " place of --es-url, --es-username and --es-password (default: %(default)s)",
+        action=EnvDefault,
+        envvar="ES_VAULT_PATH",
+        required=False,
+        type=str,
+    )
+    parser.add_argument(
         "--es-timeout",
         dest="es_timeout",
         help="opensearch request timeout in seconds (default: %(default)s)",
@@ -105,6 +117,14 @@ def get_es_credentials_url(namespace: Namespace) -> str:
     Returns:
         str: full connection url
     """
+    if namespace.es_vault_path:
+        connection = get_vault_connection(
+            namespace, namespace.es_vault_path, "OpenSearch", "es"
+        )
+        return get_credentials_url(
+            connection.url, connection.username, connection.password
+        )
+
     return get_credentials_url(
         namespace.es_url, namespace.es_username, namespace.es_password
     )
@@ -142,6 +162,16 @@ def amqp_parser() -> ArgumentParser:
         help="AMQP cluster URL (default: %(default)s)",
         action=EnvDefault,
         envvar="AMQP_URL",
+        required=False,
+        type=str,
+    )
+    parser.add_argument(
+        "--amqp-vault-path",
+        dest="amqp_vault_path",
+        help="Vault secret holding the AMQP url, username and password, in place of"
+        " --amqp-url, --amqp-username and --amqp-password (default: %(default)s)",
+        action=EnvDefault,
+        envvar="AMQP_VAULT_PATH",
         required=False,
         type=str,
     )
@@ -630,9 +660,52 @@ def get_amqp_credentials_url(namespace: Namespace) -> str:
     Returns:
         str: full connection url
     """
+    if namespace.amqp_vault_path:
+        connection = get_vault_connection(
+            namespace, namespace.amqp_vault_path, "AMQP", "amqp"
+        )
+        return get_credentials_url(
+            connection.url, connection.username, connection.password
+        )
+
     return get_credentials_url(
         namespace.amqp_url, namespace.amqp_username, namespace.amqp_password
     )
+
+
+def get_vault_connection(
+    namespace: Namespace, path: str, service: str, option_prefix: str
+) -> ConnectionSettings:
+    """Read a connection from the vault, in place of its url, username and password
+    options
+
+    Args:
+        namespace (Namespace): result of ArgParser.parse()
+        path (str): path of the secret in the KV engine
+        service (str): service name, for the messages
+        option_prefix (str): prefix of the replaced options, like es or amqp
+
+    Raises:
+        ValueError: on incomplete vault settings, a missing secret or a secret
+            without url
+
+    Returns:
+        ConnectionSettings: connection settings
+    """
+    connection = read_connection(VaultClient(get_vault_args(namespace)), path, service)
+
+    for field in ("url", "username", "password"):
+        if getattr(namespace, f"{option_prefix}_{field}"):
+            logging.warning(
+                "%s_%s / --%s-%s is ignored: the %s connection comes from the vault",
+                option_prefix.upper(),
+                field.upper(),
+                option_prefix,
+                field,
+                service,
+            )
+
+    return connection
 
 
 def get_credentials_url(url: str, username: str, password: str) -> str:

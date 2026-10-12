@@ -5,6 +5,9 @@ HashiCorp Vault server instead of a credential file. Once a collector has starte
 reads them again periodically, so a rotated secret is used **without restarting**
 the collector.
 
+Collectors and maas-engine can also read their
+[OpenSearch and AMQP connections](#opensearch-and-amqp-connections) from the vault.
+
 ## Where the credentials are
 
 A credential entry holds exactly what an entry of the credential file holds, minus
@@ -141,6 +144,71 @@ secrets:
 
 The interface monitor reads the credentials of every interface it probes, so its
 policy has to cover them too.
+
+## OpenSearch and AMQP connections
+
+The OpenSearch and AMQP url, username and password can come from the vault instead
+of `ES_URL`, `ES_USERNAME`, `ES_PASSWORD`, `AMQP_URL`, `AMQP_USERNAME` and
+`AMQP_PASSWORD`. maas-engine reads them the same way, so every service of a stack
+shares one secret per connection.
+
+| CLI option        | Environment variable | Description                                                          |
+| ----------------- | -------------------- | -------------------------------------------------------------------- |
+| --es-vault-path   | ES_VAULT_PATH        | Secret holding the OpenSearch connection, like `maas/cds/opensearch` |
+| --amqp-vault-path | AMQP_VAULT_PATH      | Secret holding the AMQP connection, like `maas/cds/amqp`             |
+
+- The path is the secret's full path in the `VAULT_KV_MOUNT` engine. It does not
+  use `VAULT_PATH_PREFIX`, which only applies to the credential entries.
+- The vault access uses the same `VAULT_*` settings as the credentials. It works
+  whatever the `CREDENTIAL_BACKEND`.
+- Without a path, the connection comes from the environment variables, as before.
+
+Each secret holds `url`, and `username` and `password` when the service needs
+authentication:
+
+```shell
+bao kv put -mount=secret maas/cds/opensearch \
+    url=https://opensearch.internal:9200 username=maas password=...
+bao kv put -mount=secret maas/cds/amqp \
+    url=amqp://rabbitmq.internal:5672// username=maas password=...
+```
+
+Give every AppRole of the stack, collectors and maas-engine alike, a policy to read
+them:
+
+```shell
+bao policy write maas-cds-connections - <<EOF
+path "secret/data/maas/cds/opensearch" {
+  capabilities = ["read"]
+}
+path "secret/data/maas/cds/amqp" {
+  capabilities = ["read"]
+}
+EOF
+bao write auth/approle/role/maas-collector-cds \
+    token_policies=maas-collector-cds,maas-cds-connections \
+    token_ttl=1h token_max_ttl=4h secret_id_num_uses=0
+```
+
+Then replace the connection variables of the service:
+
+```yaml
+    environment:
+      ES_VAULT_PATH: maas/cds/opensearch
+      AMQP_VAULT_PATH: maas/cds/amqp
+      VAULT_ADDR: https://bao.internal:8200
+      VAULT_ROLE_ID: <role id>
+      VAULT_SECRET_ID_FILE: /run/secrets/maas_collector_cds_vault_secret_id
+```
+
+- The connections are read **once, at startup**. To rotate a password, write a new
+  version of the secret, then restart the services:
+  `docker service update --force <service>`.
+- A collector stops at startup when the vault is unavailable, the secret is missing,
+  or the secret has no `url`.
+- When `ES_URL`, `ES_USERNAME` or `ES_PASSWORD` (`AMQP_*` alike) are still set, they
+  are ignored, and a warning names them. Remove them from the compose files once the
+  secrets are in the vault, and rotate the passwords they held in plain text.
 
 ## Moving a credential file to the vault
 

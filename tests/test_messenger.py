@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -133,7 +134,8 @@ def test_chunks_do_not_mix_across_exchanges(messenger):
     instance.flush_message_groups()
 
     assert sorted(
-        (exchange, payload["document_ids"]) for exchange, _, payload in published(instance)
+        (exchange, payload["document_ids"])
+        for exchange, _, payload in published(instance)
     ) == [
         (DEFAULT_PUBLISH_EXCHANGE_NAME, ["doc-1"]),
         ("etl-exchange", ["doc-2"]),
@@ -163,3 +165,13 @@ def test_empty_routing_key_publishes_nothing(messenger):
     instance.handle_message(FakeConfig(""), "doc-1")
 
     assert instance._producer.publish.call_count == 0
+
+
+def test_setup_log_hides_the_broker_password(caplog):
+    instance = Messenger("amqp://maas:s3cr3t-amqp@rabbit.example:5672//")
+
+    with caplog.at_level(logging.DEBUG):
+        instance.setup()
+
+    assert "rabbit.example" in caplog.text
+    assert "s3cr3t-amqp" not in caplog.text
