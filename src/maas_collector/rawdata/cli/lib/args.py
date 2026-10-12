@@ -117,7 +117,7 @@ def get_es_credentials_url(namespace: Namespace) -> str:
     Returns:
         str: full connection url
     """
-    if namespace.es_vault_path:
+    if getattr(namespace, "es_vault_path", None):
         connection = get_vault_connection(
             namespace, namespace.es_vault_path, "OpenSearch", "es"
         )
@@ -660,7 +660,7 @@ def get_amqp_credentials_url(namespace: Namespace) -> str:
     Returns:
         str: full connection url
     """
-    if namespace.amqp_vault_path:
+    if getattr(namespace, "amqp_vault_path", None):
         connection = get_vault_connection(
             namespace, namespace.amqp_vault_path, "AMQP", "amqp"
         )
@@ -1017,7 +1017,7 @@ def disclaimer_parser():
 
 
 def vault_parser() -> ArgumentParser:
-    """OpenBao / HashiCorp Vault credential source CLI argument parser factory
+    """OpenBao / HashiCorp Vault access CLI argument parser factory
 
     Returns:
         ArgumentParser: vault argument parser

@@ -1,10 +1,15 @@
 """Tests for the OpenSearch and AMQP connections read from OpenBao / Vault"""
 
 import logging
+from argparse import Namespace
 
 import pytest
 
-from maas_collector.rawdata.cli.lib.args import common_parser, get_collector_args
+from maas_collector.rawdata.cli.lib.args import (
+    common_parser,
+    get_collector_args,
+    get_es_credentials_url,
+)
 from maas_collector.rawdata.collector.filecollector import CollectorArgs
 
 OPENSEARCH = {
@@ -162,3 +167,12 @@ def test_without_vault_path_the_environment_is_used(vault_env, fake_vault):
 
     assert args.es_url == "http://admin:admin@localhost:9200"
     assert fake_vault.logins == 0
+
+
+def test_namespace_built_without_the_vault_options_uses_its_url():
+    """callers that build their own namespace keep working"""
+    namespace = Namespace(
+        es_url="http://localhost:9200", es_username="admin", es_password="admin"
+    )
+
+    assert get_es_credentials_url(namespace) == "http://admin:admin@localhost:9200"
