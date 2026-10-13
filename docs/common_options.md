@@ -13,7 +13,7 @@ All collectors implementations support the options detailed in the next subsecti
 | --version           |                      | show program's version number and exit  |
 | -v, --verbose       |                      | Activate verbose mode                   |
 | -vv, --very-verbose |                      | set loglevel to DEBUG                   |
-| --working-directory | WORKING_DIRECTORY    | Directory for downloads (default: /tmp) |
+| --working-directory | WORKING_DIR          | Directory for downloads (default: /tmp) |
 
 > By default, only warnings and errors are reported on the standard output, you can use `-v` option for a reasonable amount of logs.
 
@@ -56,9 +56,9 @@ maas-collector notifies database updates with messages sent over an AMQP impleme
 
 | CLI option      | Environment variable | Description                                                   |
 | --------------- | -------------------- | ------------------------------------------------------------- |
-| --amqp-username | AMQP_USERNAME        | AMQP user name (default: guest)                               |
-| --amqp-password | AMQP_PASSWORD        | AMQP user password (default: guest)                           |
-| --amqp-url      | AMQP_URL             | AMQP cluster URL (default: amqp://localhost:5672//)           |
+| --amqp-username | AMQP_USERNAME        | AMQP user name (default: None)                                |
+| --amqp-password | AMQP_PASSWORD        | AMQP user password (default: None)                            |
+| --amqp-url      | AMQP_URL             | AMQP cluster URL (default: None)                              |
 | --amqp-vault-path | AMQP_VAULT_PATH    | Vault secret holding the AMQP url, username and password, in place of the three options above. See [vault](vault.md#opensearch-and-amqp-connections) |
 | --amqp-retries  | AMQP_RETRIES         | AMQP number of retries (default: 0). 0 for infinite           |
 | --amqp-priority | AMQP_PRIORITY        | AMQP message priority (default: 5). Higher is higher priority |
@@ -108,9 +108,9 @@ maas-collector stores data in a document database, referred as _raw data_: OpenS
 
 | CLI option                     | Environment variable         | Description                                                         |
 | ------------------------------ | ---------------------------- | ------------------------------------------------------------------- |
-| --es-username                  | ES_USERNAME                  | OpenSearch user identifier (default: admin)                         |
-| --es-password                  | ES_PASSWORD                  | OpenSearch user password (default: admin)                           |
-| --es-url                       | ES_URL                       | OpenSearch cluster URL (default: http://localhost)                  |
+| --es-username                  | ES_USERNAME                  | OpenSearch user identifier (default: None)                          |
+| --es-password                  | ES_PASSWORD                  | OpenSearch user password (default: None)                            |
+| --es-url                       | ES_URL                       | OpenSearch cluster URL (default: None)                              |
 | --es-vault-path                | ES_VAULT_PATH                | Vault secret holding the OpenSearch url, username and password, in place of the three options above. See [vault](vault.md#opensearch-and-amqp-connections) |
 | --es-timeout                   | ES_TIMEOUT                   | OpenSearch request timeout in seconds (default: 120)                |
 | --es-retries                   | ES_RETRIES                   | OpenSearch number of retries (default: 3)                           |
@@ -128,7 +128,7 @@ Health check is required to inform cluster software of the status of the service
 | CLI option             | Environment variable | Description                                                 |
 | ---------------------- | -------------------- | ----------------------------------------------------------- |
 | --healthcheck-hostname | HEALTHCHECK_HOSTNAME | Health check host name (default: 0.0.0.0)                   |
-| --healthcheck-port     | HEALTHCHECK_PORT     | Health check port (default: 8127)                           |
+| --healthcheck-port     | HEALTHCHECK_PORT     | Health check port (default: 80, the images set 8080)        |
 | --healthcheck-timeout  | HEALTHCHECK_TIMEOUT  | Time before set status to error in seconds. (default: 1800) |
 
 > **HEALTHCHECK_TIMEOUT** shall be chosen wisely : it has been implemented to make Kubernetes automatically restart stuck collectors (a rare case that sometimes happens with network connectivity problems).

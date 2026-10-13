@@ -85,9 +85,15 @@
 - The debug message of `Messenger.setup()` no longer shows the AMQP password. The
   collector entry points do not call this method, so this message never reached their
   logs.
-- `docs/common_options.md` named `ES_IGNORE_CERTS_VERIFICATION`, which nothing reads.
-  The variable is `IGNORE_CERTS_VERIFICATION`. Any non-empty value turns the OpenSearch
-  certificate verification off, even `False`.
+- `docs/common_options.md` had wrong entries:
+  - It named `ES_IGNORE_CERTS_VERIFICATION`, which nothing reads. The variable is
+    `IGNORE_CERTS_VERIFICATION`, and any non-empty value turns the OpenSearch
+    certificate verification off, even `False`.
+  - It named `WORKING_DIRECTORY`, which nothing reads either. The working directory
+    comes from `WORKING_DIR`, and defaults to `/tmp`.
+  - The health check port defaults to 80, not 8127. The images set
+    `HEALTHCHECK_PORT=8080`.
+  - The OpenSearch and AMQP url, username and password have no default value.
 
 ### Requirements and upgrade
 
