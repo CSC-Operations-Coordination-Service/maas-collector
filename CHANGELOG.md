@@ -22,11 +22,16 @@
   client follows `https_proxy`, and an egress proxy usually refuses the vault port,
   which stops the collector at startup.
 - At startup, the collector stops when the vault settings are incomplete, when the
-  vault cannot be read, or when the vault policy denies one of its entries. When none
-  of its entries is found, it logs an error naming `VAULT_KV_MOUNT` and
+  vault cannot be read, or when the vault policy denies one of the entries it looks up.
+  When none of its entries is found, it logs an error naming `VAULT_KV_MOUNT` and
   `VAULT_PATH_PREFIX`, then starts without credentials.
+- The collector looks up the entries named after the `interface_credentials` and the
+  `interface_name` of every configuration, even names without a secret, and the vault
+  refuses a path outside its policy even when nothing is stored there. So the policy
+  has to allow reading all these names: a wildcard on the prefix, like
+  `secret/data/maas-collector/cds/*`, covers them.
 - The interface monitor reads the credentials of every interface it probes, so its
-  vault policy has to cover them.
+  vault policy has to cover the names of these interfaces too.
 - New `scripts/credentials_to_vault.py` copies a credential file to the vault, one
   secret per entry, and keeps the value types. It uses `VAULT_ADDR` and `VAULT_TOKEN`
   (a token allowed to write under the prefix), and its `--kv-mount` and `--path-prefix`
@@ -107,7 +112,13 @@
   `CREDENTIAL_BACKEND=vault` and the `VAULT_*` settings, and remove `CREDENTIAL_FILE`,
   which the vault backend does not read.
 - To move the connections, write the OpenSearch and AMQP secrets and set
-  `ES_VAULT_PATH` and `AMQP_VAULT_PATH`. Then remove the `ES_*` and `AMQP_*` connection
-  variables and rotate the passwords they held in plain text. See `docs/vault.md`.
+  `ES_VAULT_PATH` and `AMQP_VAULT_PATH`, with the `VAULT_*` settings and the secret id.
+  Then remove `ES_URL`, `ES_USERNAME`, `ES_PASSWORD`, `AMQP_URL`, `AMQP_USERNAME` and
+  `AMQP_PASSWORD`. Keep the other `ES_*` and `AMQP_*` settings, like `ES_TIMEOUT` or
+  `AMQP_EXCHANGE`.
+- Then rotate the passwords these six variables held in plain text. Other services
+  often share these credentials: rotate a password once every service using it reads
+  it from the vault, or update the other services in the same window. The services
+  that read the vault use a new password only after a restart. See `docs/vault.md`.
 
 Earlier versions are only recorded in the git history.

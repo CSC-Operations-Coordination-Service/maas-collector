@@ -91,6 +91,13 @@ is `cds`.
    EOF
    ```
 
+   Keep the wildcard. The collector looks up two entries per configuration, named
+   after its `interface_credentials` and its `interface_name`, even when no secret
+   exists under one of these names. The vault refuses a path outside the policy
+   whether a secret exists there or not, and the collector then refuses to start. A
+   policy listing only the existing entries is not enough: it has to allow reading
+   every one of these names.
+
 3. Create an AppRole role with short-lived tokens:
 
    ```shell
@@ -158,7 +165,7 @@ and `no_proxy`: an egress proxy usually refuses port 8200, and the collectors wo
 then fail at startup with a `ProxyError`.
 
 The interface monitor reads the credentials of every interface it probes, so its
-policy has to cover them too.
+policy has to cover the names of these interfaces too.
 
 ## OpenSearch and AMQP connections
 
@@ -211,17 +218,24 @@ bao write auth/approle/role/maas-collector-cds \
     token_ttl=1h token_max_ttl=4h secret_id_num_uses=0
 ```
 
-Then replace the connection variables of the service:
+Then replace the connection variables of the service. The vault access is the one of
+[Deploying a collector](#deploying-a-collector), with the same secrets declared at the
+top level of the compose file: a collector that already reads its credentials from the
+vault only needs the two paths.
 
 ```yaml
     environment:
       ES_VAULT_PATH: maas/cds/opensearch
       AMQP_VAULT_PATH: maas/cds/amqp
       VAULT_ADDR: https://bao.internal:8200
+      VAULT_CACERT: /run/secrets/vault_ca
       VAULT_ROLE_ID: <role id>
       VAULT_SECRET_ID_FILE: /run/secrets/maas_collector_cds_vault_secret_id
       NO_PROXY: bao.internal
       no_proxy: bao.internal
+    secrets:
+      - maas_collector_cds_vault_secret_id
+      - vault_ca
 ```
 
 - The connections are read **once, at startup**. To rotate a password, write a new
@@ -229,9 +243,14 @@ Then replace the connection variables of the service:
   `docker service update --force <service>`.
 - A collector stops at startup when the vault is unavailable, the secret is missing,
   or the secret has no `url`.
-- When `ES_URL`, `ES_USERNAME` or `ES_PASSWORD` (`AMQP_*` alike) are still set, they
-  are ignored, and a warning names them. Remove them from the compose files once the
-  secrets are in the vault, and rotate the passwords they held in plain text.
+- When `ES_URL`, `ES_USERNAME` or `ES_PASSWORD` (`AMQP_URL`, `AMQP_USERNAME` and
+  `AMQP_PASSWORD` alike) are still set, they are ignored, and a warning names them.
+  Remove these six variables from the compose files once the secrets are in the vault.
+  Keep the other `ES_*` and `AMQP_*` settings, like `ES_TIMEOUT` or `AMQP_EXCHANGE`.
+- Then rotate the passwords these six variables held in plain text. Other services
+  often share these credentials: rotate a password once every service using it reads
+  it from the vault, or update the other services in the same window. The services
+  that read the vault use a new password only after a restart.
 
 ## Moving a credential file to the vault
 
@@ -268,7 +287,8 @@ bao kv patch -mount=secret maas-collector/cds/common_cred client_password=-
 Collectors read the credentials again at the start of their first loop after
 `CREDENTIAL_REFRESH_PERIOD` seconds, so a change is used within about
 `CREDENTIAL_REFRESH_PERIOD` plus `WATCH_PERIOD` plus the duration of the current
-loop. A replay also reads them before each retry. When a collector picks a change
+loop. A replay also reads them again between its retries, once
+`CREDENTIAL_REFRESH_PERIOD` has passed. When a collector picks a change
 up, it logs the names of the entries that changed, never their values:
 `Credentials changed for common_cred`. Changes to entries the collector does not use
 are ignored.
@@ -287,7 +307,8 @@ place.
 ## When the vault is unavailable
 
 - **At startup**, the collector stops with an error, as it does when the credential
-  file is missing. It also stops when the vault policy denies one of its entries.
+  file is missing. It also stops when the vault policy denies one of the entries it
+  looks up (see [Setting up the vault](#setting-up-the-vault)).
 - **At startup, when none of the entries is found**, the collector logs an error
   naming `VAULT_KV_MOUNT` and `VAULT_PATH_PREFIX`, the usual culprits, and starts
   without credentials. It does not stop, as collectors without credentials may share
