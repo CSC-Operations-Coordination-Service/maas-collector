@@ -114,7 +114,12 @@ maas-collector stores data in a document database, referred as _raw data_: OpenS
 | --es-vault-path                | ES_VAULT_PATH                | Vault secret holding the OpenSearch url, username and password, in place of the three options above. See [vault](vault.md#opensearch-and-amqp-connections) |
 | --es-timeout                   | ES_TIMEOUT                   | OpenSearch request timeout in seconds (default: 120)                |
 | --es-retries                   | ES_RETRIES                   | OpenSearch number of retries (default: 3)                           |
-| --es-ignore-certs-verification | ES_IGNORE_CERTS_VERIFICATION | If set, the SSL cert of opensearch is not verified (default: False) |
+| --es-ignore-certs-verification | IGNORE_CERTS_VERIFICATION    | Skip the OpenSearch certificate verification (default: False)       |
+
+> `IGNORE_CERTS_VERIFICATION` has no `ES_` prefix. Any non-empty value turns the
+> certificate verification off, even `False` or `0`. To keep the verification,
+> leave the variable unset or empty. `--es-ignore-certs-verification` takes a value
+> too, read the same way.
 
 ### Health check options
 
