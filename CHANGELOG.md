@@ -87,7 +87,9 @@
 
 ### Requirements and upgrade
 
-- maas-collector now requires `maas-model[vault]>=3.1.0,<4`, which brings `hvac`.
+- maas-collector now requires maas-model 3.1.0 or later, below 4, with its `vault`
+  extra, which brings `hvac`. The requirement reads `maas-model[vault]>=3.1.0.dev0,<4`
+  so that development builds also accept the maas-model development builds.
 - A collector that sets none of the new variables runs as before, apart from the
   credential file refresh and the fixes above.
 - To move a stack's credentials to the vault, write its entries with
