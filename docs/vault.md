@@ -189,6 +189,11 @@ bao kv put -mount=secret maas/cds/amqp \
     url=amqp://rabbitmq.internal:5672// username=maas password=-
 ```
 
+Store the username and password as they are. The collector percent-encodes them
+when it builds the connection url, so they may contain any character. Before using
+`/`, `?`, `#` or `%` in a password shared with other services, like maas-engine,
+check that these services accept it too.
+
 Give every AppRole of the stack, collectors and maas-engine alike, a policy to read
 them:
 

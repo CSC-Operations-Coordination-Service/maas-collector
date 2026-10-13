@@ -69,6 +69,10 @@
 - When a vault path is set, the url, username and password variables of that
   connection are ignored, and a warning names the ones still set (never their values).
   Without a vault path, the collector uses them as before.
+- The username and password stored in the vault may contain any character, like `/`,
+  `#` or `%`: the collector percent-encodes them in the connection URL. The `ES_*` and
+  `AMQP_*` variables are still used as they are, so a special character there still
+  has to be percent-encoded by hand.
 
 ### Fixes
 

@@ -121,9 +121,7 @@ def get_es_credentials_url(namespace: Namespace) -> str:
         connection = get_vault_connection(
             namespace, namespace.es_vault_path, "OpenSearch", "es"
         )
-        return get_credentials_url(
-            connection.url, connection.username, connection.password
-        )
+        return get_vault_credentials_url(connection)
 
     return get_credentials_url(
         namespace.es_url, namespace.es_username, namespace.es_password
@@ -664,9 +662,7 @@ def get_amqp_credentials_url(namespace: Namespace) -> str:
         connection = get_vault_connection(
             namespace, namespace.amqp_vault_path, "AMQP", "amqp"
         )
-        return get_credentials_url(
-            connection.url, connection.username, connection.password
-        )
+        return get_vault_credentials_url(connection)
 
     return get_credentials_url(
         namespace.amqp_url, namespace.amqp_username, namespace.amqp_password
@@ -706,6 +702,39 @@ def get_vault_connection(
             )
 
     return connection
+
+
+def get_vault_credentials_url(connection: ConnectionSettings) -> str:
+    """url of a connection read from the vault, with its credentials
+
+    The vault holds the user name and password as they are: they are percent-encoded
+    here, and opensearch-py and kombu decode them. Otherwise a "/", "?" or "#" would
+    end the host part of the url, and a "%" start an escape. The ES_* and AMQP_*
+    options are not encoded, as they may hold encoded values already.
+
+    Args:
+        connection (ConnectionSettings): connection read from the vault
+
+    Returns:
+        str: url with credentials
+    """
+    return get_credentials_url(
+        connection.url,
+        quote_url_credential(connection.username),
+        quote_url_credential(connection.password),
+    )
+
+
+def quote_url_credential(value: str) -> str:
+    """Percent-encode a user name or password for the user information of an url
+
+    Args:
+        value (str): user name or password, possibly empty
+
+    Returns:
+        str: encoded value, or the value itself when empty
+    """
+    return urllib.parse.quote(str(value), safe="") if value else value
 
 
 def get_credentials_url(url: str, username: str, password: str) -> str:

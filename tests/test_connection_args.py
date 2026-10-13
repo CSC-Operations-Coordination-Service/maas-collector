@@ -4,6 +4,8 @@ import logging
 from argparse import Namespace
 
 import pytest
+from kombu import Connection
+from opensearchpy import OpenSearch
 
 from maas_collector.rawdata.cli.lib.args import (
     common_parser,
@@ -124,6 +126,46 @@ def test_vault_connection_replaces_the_environment(vault_env, caplog):
 
     assert "old-plain-text-password" not in caplog.text
     assert "s3cr3t-opensearch" not in caplog.text
+
+
+def test_vault_credentials_reach_the_clients_unchanged(vault_env, fake_vault):
+    """the vault holds raw values: a "/", "?" or "#" must not end the host part of
+    the url, nor a "%41" turn into "A" """
+    username = "maas@cds"
+    password = "a/b#c%41?d:e@f"
+    fake_vault.put(
+        "secret",
+        "maas/cds/opensearch",
+        {**OPENSEARCH, "username": username, "password": password},
+    )
+    fake_vault.put(
+        "secret", "maas/cds/amqp", {**AMQP, "username": username, "password": password}
+    )
+    vault_env.setenv("ES_VAULT_PATH", "maas/cds/opensearch")
+    vault_env.setenv("AMQP_VAULT_PATH", "maas/cds/amqp")
+
+    args = parse([])
+
+    opensearch_host = OpenSearch(hosts=[args.es_url]).transport.hosts[0]
+    assert opensearch_host["host"] == "opensearch.example"
+    assert opensearch_host["port"] == 9200
+    assert opensearch_host["http_auth"] == f"{username}:{password}"
+
+    amqp = Connection(args.amqp_url)
+    assert (amqp.hostname, amqp.port) == ("rabbit.example", 5672)
+    assert amqp.virtual_host == "/"
+    assert (amqp.userid, amqp.password) == (username, password)
+
+
+def test_environment_credentials_are_used_as_they_are(vault_env):
+    """ES_PASSWORD may hold an already encoded value: it is not encoded again"""
+    vault_env.setenv("ES_URL", "http://localhost:9200")
+    vault_env.setenv("ES_USERNAME", "admin")
+    vault_env.setenv("ES_PASSWORD", "a%2Fb")
+
+    args = parse([])
+
+    assert args.es_url == "http://admin:a%2Fb@localhost:9200"
 
 
 def test_vault_connection_without_authentication(vault_env, fake_vault):
