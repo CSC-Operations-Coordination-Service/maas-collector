@@ -113,6 +113,12 @@ class JIRAExtendedCollector(FileCollector):
                     "Interface %s does not need to be refreshed: skipped",
                     config.interface_name,
                 )
+            # catch broad exception so a failing interface does not skip the next ones
+            # pylint: disable=W0703
+            except Exception:
+                self.logger.exception(
+                    "Cannot collect interface %s", config.interface_name
+                )
             finally:
                 # flush messages between interfaces as they don't ingest the same data
                 self._flush_message_groups()

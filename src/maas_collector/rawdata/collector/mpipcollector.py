@@ -150,7 +150,15 @@ class MpipCollector(HttpCollector, HttpMixin):
                 # pseudo configuration for auxiliary ingestion, like downloaded files
                 continue
 
-            self.ingest_interface(CollectorJournal(config), config)
+            try:
+                self.ingest_interface(CollectorJournal(config), config)
+
+            # catch broad exception so a failing interface does not skip the next ones
+            # pylint: disable=W0703
+            except Exception:
+                self.logger.exception(
+                    "Cannot collect interface %s", config.interface_name
+                )
 
             if self.should_stop_loop:
                 break
