@@ -234,6 +234,9 @@ class HttpCollector(FileCollector, HttpMixin):
                     self.logger.info("Waiting 10s before retrying the replay")
                     sleep(10)
 
+                    # a replay runs within one loop: pick up rotated credentials
+                    self.refresh_credentials()
+
             if finished_without_errors:
                 self.logger.info(
                     "Completed replay for %s between %s and %s",
@@ -256,7 +259,16 @@ class HttpCollector(FileCollector, HttpMixin):
         """Nominal ingestion from Http: collect all the Http configurations"""
         # iterate over all Http collector configurations
         for config in self.configs:
-            self.ingest_interface(CollectorJournal(config), config)
+            try:
+                self.ingest_interface(CollectorJournal(config), config)
+
+            # catch broad exception so a failing interface does not skip the next ones.
+            # Not done in ingest_interface: replay relies on the error to retry
+            # pylint: disable=W0703
+            except Exception:
+                self.logger.exception(
+                    "Cannot collect interface %s", config.interface_name
+                )
 
             if self.should_stop_loop:
                 break

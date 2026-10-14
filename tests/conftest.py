@@ -14,6 +14,8 @@ from opensearchpy.connection.connections import connections as es_connections
 import pytest
 from requests.exceptions import ConnectionError as RequestConnectionError
 
+from maas_model.testing.fakevault import FakeVault
+
 
 @pytest.fixture
 def mock_client():
@@ -22,6 +24,15 @@ def mock_client():
     yield client
     es_connections._conn = {}
     es_connections._kwargs = {}
+
+
+@pytest.fixture
+def fake_vault():
+    """a running in-process OpenBao / Vault"""
+    vault = FakeVault()
+    vault.start()
+    yield vault
+    vault.stop()
 
 
 class MockResponse:

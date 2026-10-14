@@ -345,6 +345,10 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         self.meta_dict: Dict[str, InterfaceMeta] = {}
 
+        # FileCollector.setup asks for the credentials of every configuration of
+        # the directory: read them once the probed interfaces are known instead
+        self._probed_interfaces_known = False
+
         self.last_modification_date_dict: Dict[str, datetime.datetime] = {}
 
         self.retries: List[ProbeRetry] = []
@@ -370,7 +374,11 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
                 f" with name {self.monitor_config.interface_name}"
             )
 
-        credential_dict = self.load_credential_dict(self.args.credential_file)
+        # probing the interfaces requires their credentials
+        if self.credential_provider is None:
+            raise ValueError(
+                "No credential source: set CREDENTIAL_FILE or CREDENTIAL_BACKEND"
+            )
 
         meta_list: List[InterfaceMeta] = []
 
@@ -413,14 +421,6 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
                     )
                     continue
 
-                self.logger.debug("Applying credentials to %s", config.interface_name)
-
-                try:
-                    self.set_credential_attributes(config, credential_dict)
-                except KeyError as error:
-                    self.logger.warning(error)
-                    continue
-
                 interface_meta = InterfaceMeta(
                     name=collect_conf_dict["interface_name"],
                     configuration_path=config_path,
@@ -448,8 +448,33 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         self.meta_dict = {meta.name: meta for meta in meta_list}
 
+        # probing the interfaces requires their credentials
+        self._probed_interfaces_known = True
+        self.load_credentials()
+
         self.ko_manager = KOManagerThread(self.configs[0])
         self.ko_manager.start()
+
+    def load_credentials(self):
+        """read the credentials of the monitoring and probed configurations, once
+        setup knows the probed interfaces"""
+        if self._probed_interfaces_known:
+            super().load_credentials()
+
+    def credential_targets(self) -> list:
+        """the monitoring configuration and the configurations of the probed
+        interfaces
+
+        A refresh sets the attributes of a configuration one after the other, while
+        the retry threads may probe it: such a probe can pair a new username with an
+        old password. The next retry uses the complete new credentials.
+
+        Returns:
+            list: configurations
+        """
+        return self.configs + [
+            meta.config for meta in self.meta_dict.values() if meta.config is not None
+        ]
 
     def ingest(self, path=None, configs=None, force_update=None):
         """Ingest from SFTP. All arguments are ignored so defaults to None

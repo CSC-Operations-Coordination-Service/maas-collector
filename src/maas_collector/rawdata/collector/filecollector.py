@@ -40,6 +40,7 @@ from maas_collector.rawdata.messenger import Messenger
 from maas_collector.rawdata.replay import ReplayArgs
 
 from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
+from maas_collector.rawdata.collector.credentialprovider import VaultArgs
 
 from maas_collector.rawdata.meta import IngestionMeta
 
@@ -77,6 +78,14 @@ class CollectorArgs:
     amqp_retries: int = 0
 
     credential_file: str = ""
+
+    # where credentials are read from: file (credential_file) or vault
+    credential_backend: str = "file"
+
+    # seconds between two reads of the credentials, 0 reads them only at startup
+    credential_refresh_period: int = 300
+
+    vault: VaultArgs = None
 
     amqp_priority: int = 0
 
@@ -383,9 +392,8 @@ class FileCollector(CredentialMixin):
             # like config.model does beats failing on the first backed up file
             config.backup_report_model = get_model(report_model_name)
 
-        # handle optionnal credential file
-        if self.args.credential_file:
-            self.load_credentials(self.args.credential_file)
+        # handle optionnal credential source
+        self.load_credentials()
 
     @property
     def config_files(self) -> list[str]:
@@ -792,6 +800,10 @@ class FileCollector(CredentialMixin):
             while not self.should_stop_loop:
                 self.loop_start_time = time.time()
                 self._healthcheck.tick()
+
+                # pick up rotated credentials. Not in on_loop_start so overrides
+                # cannot skip it
+                self.refresh_credentials()
 
                 # call template method
                 self.on_loop_start()

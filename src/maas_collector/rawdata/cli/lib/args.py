@@ -8,6 +8,9 @@ from argparse import Action, ArgumentParser, Namespace
 import maas_collector
 
 from maas_collector.queues.queues import DEFAULT_PUBLISH_EXCHANGE_NAME
+from maas_model.vault import ConnectionSettings, VaultClient, read_connection
+
+from maas_collector.rawdata.collector.credentialprovider import VaultArgs
 from maas_collector.rawdata.replay import ReplayArgs
 
 
@@ -61,6 +64,16 @@ def es_parser() -> ArgumentParser:
         type=str,
     )
     parser.add_argument(
+        "--es-vault-path",
+        dest="es_vault_path",
+        help="Vault secret holding the opensearch url, username and password, in"
+        " place of --es-url, --es-username and --es-password (default: %(default)s)",
+        action=EnvDefault,
+        envvar="ES_VAULT_PATH",
+        required=False,
+        type=str,
+    )
+    parser.add_argument(
         "--es-timeout",
         dest="es_timeout",
         help="opensearch request timeout in seconds (default: %(default)s)",
@@ -104,6 +117,12 @@ def get_es_credentials_url(namespace: Namespace) -> str:
     Returns:
         str: full connection url
     """
+    if getattr(namespace, "es_vault_path", None):
+        connection = get_vault_connection(
+            namespace, namespace.es_vault_path, "OpenSearch", "es"
+        )
+        return get_vault_credentials_url(connection)
+
     return get_credentials_url(
         namespace.es_url, namespace.es_username, namespace.es_password
     )
@@ -141,6 +160,16 @@ def amqp_parser() -> ArgumentParser:
         help="AMQP cluster URL (default: %(default)s)",
         action=EnvDefault,
         envvar="AMQP_URL",
+        required=False,
+        type=str,
+    )
+    parser.add_argument(
+        "--amqp-vault-path",
+        dest="amqp_vault_path",
+        help="Vault secret holding the AMQP url, username and password, in place of"
+        " --amqp-url, --amqp-username and --amqp-password (default: %(default)s)",
+        action=EnvDefault,
+        envvar="AMQP_VAULT_PATH",
         required=False,
         type=str,
     )
@@ -629,9 +658,83 @@ def get_amqp_credentials_url(namespace: Namespace) -> str:
     Returns:
         str: full connection url
     """
+    if getattr(namespace, "amqp_vault_path", None):
+        connection = get_vault_connection(
+            namespace, namespace.amqp_vault_path, "AMQP", "amqp"
+        )
+        return get_vault_credentials_url(connection)
+
     return get_credentials_url(
         namespace.amqp_url, namespace.amqp_username, namespace.amqp_password
     )
+
+
+def get_vault_connection(
+    namespace: Namespace, path: str, service: str, option_prefix: str
+) -> ConnectionSettings:
+    """Read a connection from the vault, in place of its url, username and password
+    options
+
+    Args:
+        namespace (Namespace): result of ArgParser.parse()
+        path (str): path of the secret in the KV engine
+        service (str): service name, for the messages
+        option_prefix (str): prefix of the replaced options, like es or amqp
+
+    Raises:
+        ValueError: on incomplete vault settings, a missing secret or a secret
+            without url
+
+    Returns:
+        ConnectionSettings: connection settings
+    """
+    connection = read_connection(VaultClient(get_vault_args(namespace)), path, service)
+
+    for field in ("url", "username", "password"):
+        if getattr(namespace, f"{option_prefix}_{field}"):
+            logging.warning(
+                "%s_%s / --%s-%s is ignored: the %s connection comes from the vault",
+                option_prefix.upper(),
+                field.upper(),
+                option_prefix,
+                field,
+                service,
+            )
+
+    return connection
+
+
+def get_vault_credentials_url(connection: ConnectionSettings) -> str:
+    """url of a connection read from the vault, with its credentials
+
+    The vault holds the user name and password as they are: they are percent-encoded
+    here, and opensearch-py and kombu decode them. Otherwise a "/", "?" or "#" would
+    end the host part of the url, and a "%" start an escape. The ES_* and AMQP_*
+    options are not encoded, as they may hold encoded values already.
+
+    Args:
+        connection (ConnectionSettings): connection read from the vault
+
+    Returns:
+        str: url with credentials
+    """
+    return get_credentials_url(
+        connection.url,
+        quote_url_credential(connection.username),
+        quote_url_credential(connection.password),
+    )
+
+
+def quote_url_credential(value: str) -> str:
+    """Percent-encode a user name or password for the user information of an url
+
+    Args:
+        value (str): user name or password, possibly empty
+
+    Returns:
+        str: encoded value, or the value itself when empty
+    """
+    return urllib.parse.quote(str(value), safe="") if value else value
 
 
 def get_credentials_url(url: str, username: str, password: str) -> str:
@@ -942,6 +1045,116 @@ def disclaimer_parser():
     return parser
 
 
+def vault_parser() -> ArgumentParser:
+    """OpenBao / HashiCorp Vault access CLI argument parser factory
+
+    Returns:
+        ArgumentParser: vault argument parser
+    """
+    parser = ArgumentParser(add_help=False)
+
+    parser.add_argument(
+        "--vault-addr",
+        dest="vault_addr",
+        help="Vault address, like https://vault:8200 (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_ADDR",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-kv-mount",
+        dest="vault_kv_mount",
+        help="Mount point of the KV version 2 secret engine (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_KV_MOUNT",
+        required=False,
+        default="secret",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-path-prefix",
+        dest="vault_path_prefix",
+        help="Path of the credential secrets in the engine (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_PATH_PREFIX",
+        required=False,
+        default="maas-collector",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-auth-method",
+        dest="vault_auth_method",
+        help="Vault authentication method (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_AUTH_METHOD",
+        required=False,
+        default="approle",
+        type=str,
+        choices=["approle", "token"],
+    )
+
+    parser.add_argument(
+        "--vault-role-id",
+        dest="vault_role_id",
+        help="AppRole role id (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_ROLE_ID",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-secret-id-file",
+        dest="vault_secret_id_file",
+        help="File holding the AppRole secret id (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_SECRET_ID_FILE",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--vault-token-file",
+        dest="vault_token_file",
+        help="File holding the vault token for the token authentication method,"
+        " VAULT_TOKEN is used without it (default: %(default)s)",
+        action=EnvDefault,
+        envvar="VAULT_TOKEN_FILE",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    return parser
+
+
+def get_vault_args(namespace: Namespace) -> VaultArgs:
+    """VaultArgs factory
+
+    Args:
+        namespace (Namespace): parsed arguments
+
+    Returns:
+        VaultArgs: vault settings
+    """
+    return VaultArgs(
+        url=namespace.vault_addr,
+        kv_mount=namespace.vault_kv_mount,
+        path_prefix=namespace.vault_path_prefix,
+        auth_method=namespace.vault_auth_method,
+        role_id=namespace.vault_role_id,
+        secret_id_file=namespace.vault_secret_id_file,
+        token_file=namespace.vault_token_file,
+    )
+
+
 def common_parser() -> ArgumentParser:
     """common cli parser factory
 
@@ -957,6 +1170,7 @@ def common_parser() -> ArgumentParser:
             backup_parser_s3(),
             backup_parser_sftp(),
             replay_parser(),
+            vault_parser(),
         ],
     )
 
@@ -1085,6 +1299,31 @@ def common_parser() -> ArgumentParser:
         type=str,
     )
 
+    parser.add_argument(
+        "--credential-backend",
+        dest="credential_backend",
+        help="Where credentials are read from: file (--credential-file) or vault"
+        " (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CREDENTIAL_BACKEND",
+        required=False,
+        default="file",
+        type=str,
+        choices=["file", "vault"],
+    )
+
+    parser.add_argument(
+        "--credential-refresh-period",
+        dest="credential_refresh_period",
+        help="Seconds between two reads of the credentials, 0 reads them only at"
+        " startup (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CREDENTIAL_REFRESH_PERIOD",
+        required=False,
+        type=int,
+        default=300,
+    )
+
     return parser
 
 
@@ -1115,6 +1354,9 @@ def get_collector_args(classobj, namespace, **kwargs):
         amqp_retries=namespace.amqp_retries,
         force_message=namespace.force_message,
         credential_file=namespace.credential_file,
+        credential_backend=namespace.credential_backend,
+        credential_refresh_period=namespace.credential_refresh_period,
+        vault=get_vault_args(namespace),
         amqp_priority=namespace.amqp_priority,
         amqp_exchange=namespace.amqp_exchange,
         **kwargs,

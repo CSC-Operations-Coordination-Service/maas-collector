@@ -9,6 +9,7 @@ import socket
 
 from kombu import BrokerConnection, Exchange, Producer
 from kombu.common import maybe_declare
+from kombu.utils.url import maybe_sanitize_url
 
 from maas_model import MAASMessage
 
@@ -142,7 +143,9 @@ class Messenger:
 
     def setup(self):
         """Connect to the AMQP broker and setup message producer"""
-        self.logger.debug("Setup connection to AMQP broker: %s", self.url)
+        self.logger.debug(
+            "Setup connection to AMQP broker: %s", maybe_sanitize_url(self.url)
+        )
 
     def load_config_file(self, path: str):
         """Load amqp configuration from file"""
