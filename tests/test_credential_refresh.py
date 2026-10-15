@@ -124,10 +124,21 @@ def edit_entries(path, edit):
     path.write_text(json.dumps(content), encoding="UTF-8")
 
 
-def start_monitor(credential_file) -> InterfaceMonitor:
+@pytest.fixture
+def probed_dir(tmp_path):
+    """configuration directory of the interfaces the monitor probes"""
+    path = tmp_path / "probed"
+    path.mkdir()
+    shutil.copy(PROBED_CONF, path)
+    return path
+
+
+def start_monitor(credential_file, probed_dir) -> InterfaceMonitor:
     monitor = InterfaceMonitor(
         CollectorArgs(
-            rawdata_config=MONITOR_CONF, credential_file=str(credential_file)
+            rawdata_config=MONITOR_CONF,
+            rawdata_config_dir=str(probed_dir),
+            credential_file=str(credential_file),
         ),
         InterfaceMonitorConfiguration(interface_name="OMCS_Monitoring"),
     )
@@ -419,12 +430,10 @@ def test_vault_without_any_requested_entry_logs_an_error(
     assert "VAULT_PATH_PREFIX" in errors[0]
 
 
-@patch("maas_collector.rawdata.collector.monitorcollector.find_configurations")
 def test_monitor_probes_with_the_rotated_credentials(
-    find_conf_mock, clock, credential_file
+    clock, credential_file, probed_dir
 ):
-    find_conf_mock.return_value = [PROBED_CONF]
-    monitor = start_monitor(credential_file)
+    monitor = start_monitor(credential_file, probed_dir)
 
     sent_headers = []
 
@@ -452,11 +461,9 @@ def test_monitor_probes_with_the_rotated_credentials(
     ]
 
 
-@patch("maas_collector.rawdata.collector.monitorcollector.find_configurations")
 def test_monitor_reads_the_credentials_once_at_startup(
-    find_conf_mock, credential_file, monkeypatch
+    credential_file, probed_dir, monkeypatch
 ):
-    find_conf_mock.return_value = [PROBED_CONF]
     loads = []
     load = FileCredentialProvider.load
 
@@ -466,22 +473,20 @@ def test_monitor_reads_the_credentials_once_at_startup(
 
     monkeypatch.setattr(FileCredentialProvider, "load", counting_load)
 
-    monitor = start_monitor(credential_file)
+    monitor = start_monitor(credential_file, probed_dir)
     monitor.exit_gracefully(9, "")
 
     assert len(loads) == 1
     assert "basic_test" in loads[0]
 
 
-@patch("maas_collector.rawdata.collector.monitorcollector.find_configurations")
 def test_monitor_probes_interfaces_without_credential_entry(
-    find_conf_mock, credential_file
+    credential_file, probed_dir
 ):
     """some interfaces need no credentials: the monitor still probes them"""
-    find_conf_mock.return_value = [PROBED_CONF]
     edit_entries(credential_file, remove_entry("basic_test"))
 
-    monitor = start_monitor(credential_file)
+    monitor = start_monitor(credential_file, probed_dir)
     monitor.exit_gracefully(9, "")
 
     assert "basic_test" in monitor.meta_dict

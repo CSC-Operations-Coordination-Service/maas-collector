@@ -1,6 +1,8 @@
 """Tests for restarting a collector when its OpenSearch configuration changes"""
 
+import json
 import logging
+import os
 import time
 from unittest.mock import patch
 
@@ -16,10 +18,21 @@ from maas_collector.rawdata.collector.filecollector import (
     CollectorArgs,
     FileCollector,
 )
+from maas_collector.rawdata.collector.monitorcollector import (
+    InterfaceMonitor,
+    InterfaceMonitorConfiguration,
+)
 from maas_collector.rawdata.configprovider import ConfigStoreArgs
 from maas_collector.rawdata.configstore import ConfigStore
 
 INDEX = "maas-collector-config"
+
+CONF_DIR = os.path.join(os.path.dirname(__file__), "conf")
+
+
+def read_json(path):
+    with open(path, encoding="UTF-8") as conf_fd:
+        return json.load(conf_fd)
 
 
 class FakeClock:
@@ -333,3 +346,48 @@ def test_file_backend_never_checks(clock, tmp_path):
         collector.check_config_changes()
 
     load.assert_not_called()
+
+
+MONITOR_CONF = os.path.join(CONF_DIR, "maas-collector-interface-monitoring.json")
+
+PROBED_CONF = os.path.join(CONF_DIR, "test-maas-collector-odata-basic.json")
+
+CREDENTIAL_FILE = os.path.join(CONF_DIR, "test-maas-collector-credentials.json")
+
+
+def test_monitor_rejects_a_probed_entry_its_collector_cannot_load(
+    clock, fake_opensearch, caplog
+):
+    """the monitoring class accepts any entry, the probed collector class may not"""
+    store = ConfigStore(fake_opensearch, INDEX)
+    store.publish(
+        "monitor/main.json", read_json(MONITOR_CONF), ["monitor-main"], "a", "v1"
+    )
+    store.publish(
+        "odata/basic.json", read_json(PROBED_CONF), ["monitor-main"], "a", "v1"
+    )
+    monitor = InterfaceMonitor(
+        CollectorArgs(
+            es_url="http://opensearch.example:9200",
+            config_backend="opensearch",
+            config_store=ConfigStoreArgs(index=INDEX, service="monitor-main"),
+            credential_file=CREDENTIAL_FILE,
+        ),
+        InterfaceMonitorConfiguration(interface_name="OMCS_Monitoring"),
+    )
+    with patch("opensearchpy.connection.connections.Connections.create_connection"):
+        monitor.setup()
+
+    broken = read_json(PROBED_CONF)
+    broken["collectors"][0]["class"] = "NoSuchCollectorConfiguration"
+    add_config_document(
+        fake_opensearch, "odata/basic.json", 2, ["monitor-main"], broken
+    )
+
+    try:
+        clock.now += 300
+        monitor.check_config_changes()
+    finally:
+        monitor.exit_gracefully(9, "")
+
+    assert "configuration change rejected: odata/basic.json@2: KeyError" in caplog.text

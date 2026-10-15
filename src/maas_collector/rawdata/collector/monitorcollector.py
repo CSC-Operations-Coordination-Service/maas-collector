@@ -35,10 +35,7 @@ from maas_collector.rawdata.implementation import (
     get_collector_class_by_config_classname,
 )
 
-from maas_collector.rawdata.configuration import (
-    load_json as load_configuration_json,
-    find_configurations,
-)
+from maas_collector.rawdata.configuration import load_json_dict
 
 from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 
@@ -382,24 +379,22 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         meta_list: List[InterfaceMeta] = []
 
-        # load the configurations of the interfaces to monitor
-        for config_path in find_configurations(self.args.rawdata_config_dir):
-            with open(config_path, mode="r", encoding="UTF-8") as conf_obj:
-                conf_dict = json.load(conf_obj)
+        # load the configurations of the interfaces to monitor, from the sources
+        # the monitoring configuration came from
+        for source in self.config_sources:
+            self.logger.debug("Looking in %s", source.name)
 
-            self.logger.debug("Looking in %s", config_path)
-
-            for collect_conf_dict in conf_dict.get("collectors", []):
+            for collect_conf_dict in source.content.get("collectors", []):
                 if not collect_conf_dict.get("class"):
                     self.logger.info(
                         "Class property empty. Ignoring some configuration in %s",
-                        config_path,
+                        source.name,
                     )
                     continue
 
                 if collect_conf_dict["class"] == self.CONFIG_CLASS.__name__:
                     self.logger.debug(
-                        "Ignoring InterfaceMonitorConfiguration: %s", config_path
+                        "Ignoring InterfaceMonitorConfiguration: %s", source.name
                     )
                     continue
 
@@ -409,8 +404,8 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
                 config = [
                     config
-                    for config in load_configuration_json(
-                        config_path, collector_class.CONFIG_CLASS
+                    for config in load_json_dict(
+                        source.content, collector_class.CONFIG_CLASS, source.name
                     )
                     if config.interface_name == collect_conf_dict["interface_name"]
                 ][0]
@@ -423,7 +418,7 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
                 interface_meta = InterfaceMeta(
                     name=collect_conf_dict["interface_name"],
-                    configuration_path=config_path,
+                    configuration_path=source.name,
                     config=config,
                     probe_callable=collector_class.probe,
                 )
@@ -454,6 +449,25 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         self.ko_manager = KOManagerThread(self.configs[0])
         self.ko_manager.start()
+
+    def config_classes_for(self, meta: dict) -> list:
+        """a probed entry of a new configuration must also build with the
+        configuration class of its own collector, as setup() builds it so
+
+        Args:
+            meta (dict): collector entry
+
+        Returns:
+            list: configuration classes
+        """
+        classes = [self.CONFIG_CLASS]
+
+        name = meta.get("class")
+
+        if name and name != self.CONFIG_CLASS.__name__:
+            classes.append(get_collector_class_by_config_classname(name).CONFIG_CLASS)
+
+        return classes
 
     def load_credentials(self):
         """read the credentials of the monitoring and probed configurations, once
