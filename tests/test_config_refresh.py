@@ -3,6 +3,9 @@
 import json
 import logging
 import os
+import subprocess
+import sys
+import textwrap
 import time
 from unittest.mock import patch
 
@@ -391,3 +394,86 @@ def test_monitor_rejects_a_probed_entry_its_collector_cannot_load(
         monitor.exit_gracefully(9, "")
 
     assert "configuration change rejected: odata/basic.json@2: KeyError" in caplog.text
+
+
+MONITOR_RESTART_SCRIPT = """
+import json
+import sys
+from unittest.mock import MagicMock, patch
+
+from opensearchpy.connection.connections import connections
+
+from fakeopensearch import FakeOpenSearch
+from maas_collector.rawdata.collector.filecollector import CollectorArgs
+from maas_collector.rawdata.collector.monitorcollector import (
+    InterfaceMonitor,
+    InterfaceMonitorConfiguration,
+)
+from maas_collector.rawdata.configprovider import ConfigStoreArgs
+from maas_collector.rawdata.configstore import ConfigStore
+
+conf_dir, credential_file = sys.argv[1], sys.argv[2]
+
+
+def read_json(name):
+    with open(f"{conf_dir}/{name}", encoding="UTF-8") as conf_fd:
+        return json.load(conf_fd)
+
+
+client = FakeOpenSearch()
+connections.add_connection("default", client)
+store = ConfigStore(client, "maas-collector-config")
+store.publish(
+    "monitor/main.json",
+    read_json("maas-collector-interface-monitoring.json"),
+    ["monitor-main"],
+    "a",
+    "v1",
+)
+probed = read_json("test-maas-collector-odata-basic.json")
+store.publish("odata/basic.json", probed, ["monitor-main"], "a", "v1")
+
+monitor = InterfaceMonitor(
+    CollectorArgs(
+        es_url="http://opensearch.example:9200",
+        config_backend="opensearch",
+        config_store=ConfigStoreArgs(service="monitor-main"),
+        config_refresh_period=1,
+        credential_file=credential_file,
+        watch_period=1,
+    ),
+    InterfaceMonitorConfiguration(interface_name="OMCS_Monitoring"),
+)
+with patch("opensearchpy.connection.connections.Connections.create_connection"):
+    monitor.setup()
+
+store.publish("odata/basic.json", probed, ["monitor-main"], "a", "v2")
+monitor._config_check_time -= 10
+
+monitor._healthcheck = MagicMock()
+with patch.object(monitor, "start_healthcheck"), patch.object(
+    monitor, "stop_healthcheck"
+), patch.object(monitor, "loop_body"):
+    monitor.run([""])
+"""
+
+
+def test_monitor_process_exits_on_a_configuration_change(tmp_path):
+    """the threads of the interface monitor must not keep the process alive"""
+    script = tmp_path / "monitor_restart.py"
+    script.write_text(textwrap.dedent(MONITOR_RESTART_SCRIPT))
+    tests_dir = os.path.dirname(__file__)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.join(tests_dir, "..", "src"), tests_dir, env.get("PYTHONPATH", "")]
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script), CONF_DIR, CREDENTIAL_FILE],
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == CONFIG_CHANGED_EXIT_CODE, result.stderr.decode()[-2000:]

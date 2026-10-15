@@ -226,10 +226,9 @@ class RetryThread(Thread):
     def run(self):
         """Entry point"""
         for _ in range(self.count):
-            if self.shall_stop_event.is_set():
+            # an event wait, not a sleep: stopping does not wait for the interval
+            if self.shall_stop_event.wait(self.interval):
                 break
-
-            time.sleep(self.interval)
 
             self.last_start = datetime.datetime.now(tz=datetime.UTC)
 
@@ -703,9 +702,22 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
         else:
             probe_data.status = "KO"
 
-    def exit_gracefully(self, signum, frame):
-        super().exit_gracefully(signum, frame)
+    def run(self, path_list: List[str]) -> None:
+        """run the collector loop, then stop the probe retries: their threads are
+        not daemons, so a run() that ends on an exception, such as the exit on a
+        configuration change, would otherwise leave the process hanging"""
+        try:
+            super().run(path_list)
+        finally:
+            self.stop_ko_manager()
+
+    def stop_ko_manager(self):
+        """stop the probe retries and wait for their threads"""
         self.logger.info("Shutting down KOManager")
         self.ko_manager.stop_retry()
         self.ko_manager.join()
         self.logger.info("KOManager shutdown OK")
+
+    def exit_gracefully(self, signum, frame):
+        super().exit_gracefully(signum, frame)
+        self.stop_ko_manager()
