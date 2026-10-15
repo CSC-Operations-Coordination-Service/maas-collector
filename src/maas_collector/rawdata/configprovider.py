@@ -21,6 +21,7 @@ from maas_collector.rawdata.configuration import (
     build_model_class,
     find_configurations,
 )
+from maas_collector.rawdata.messenger import parse_chunk_config
 
 LOGGER = logging.getLogger("ConfigProvider")
 
@@ -289,6 +290,13 @@ def validate_config_sources(
             )
 
         try:
+            for key in ("collectors", "models"):
+                if not isinstance(content.get(key, []), list):
+                    raise TypeError(f"{key} must be a list")
+
+            # the chunk sizes are read as setup() reads them
+            parse_chunk_config(content)
+
             for meta in content.get("collectors", []):
                 for configuration_class in config_classes_for(meta):
                     build_collector_configuration(

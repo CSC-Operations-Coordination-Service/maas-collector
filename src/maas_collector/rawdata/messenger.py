@@ -19,6 +19,49 @@ from maas_collector.queues.queues import (
 )
 
 
+
+def parse_chunk_config(json_dict: dict) -> dict:
+    """read the chunk sizes of the content of a configuration file
+
+    Args:
+        json_dict (dict): configuration content, {collectors?, models?, amqp?}
+
+    Raises:
+        ValueError: when the amqp section is not a dict of routing keys to dicts,
+            or a chunk_size is not a positive integer
+
+    Returns:
+        dict: routing key -> chunk size
+    """
+    amqp = json_dict.get("amqp", {})
+
+    if not isinstance(amqp, dict):
+        raise ValueError(f"amqp must be an object, not {type(amqp).__name__}")
+
+    chunk_config = {}
+
+    for routing_key, routing_info in amqp.items():
+        if not isinstance(routing_info, dict):
+            raise ValueError(f"amqp.{routing_key} must be an object")
+
+        if "chunk_size" not in routing_info:
+            continue
+
+        chunk_size = routing_info["chunk_size"]
+
+        if (
+            not isinstance(chunk_size, int)
+            or isinstance(chunk_size, bool)
+            or chunk_size <= 0
+        ):
+            raise ValueError(
+                f"amqp.{routing_key}.chunk_size must be a positive integer"
+            )
+
+        chunk_config[routing_key] = chunk_size
+
+    return chunk_config
+
 class Messenger:
     """
     Messenger encapsulates collector message emitting using groups
@@ -161,14 +204,7 @@ class Messenger:
             json_dict (dict): configuration content, {collectors?, models?, amqp?}
             source (str): name of the content, for the logs
         """
-        if "amqp" not in json_dict:
-            # not amqp setting
-            return
-
-        for routing_key, routing_info in json_dict["amqp"].items():
-            if not "chunk_size" in routing_info:
-                continue
-
+        for routing_key, chunk_size in parse_chunk_config(json_dict).items():
             # log overwrite
             if routing_key in self.chunk_config:
                 # log redeclare
@@ -177,16 +213,16 @@ class Messenger:
                     source,
                     routing_key,
                     self.chunk_config[routing_key],
-                    routing_info["chunk_size"],
+                    chunk_size,
                 )
 
             self.logger.info(
                 "Set chunk configuration for %s: %d",
                 routing_key,
-                routing_info["chunk_size"],
+                chunk_size,
             )
 
-            self.chunk_config[routing_key] = routing_info["chunk_size"]
+            self.chunk_config[routing_key] = chunk_size
 
     def handle_message(self, config, document_id: str, index: str | None = None):
         """handle a document identifier and decide to send it (or not) on the message

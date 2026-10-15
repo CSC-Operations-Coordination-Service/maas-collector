@@ -36,6 +36,7 @@ from maas_collector.rawdata.implementation import (
 )
 
 from maas_collector.rawdata.configuration import load_json_dict
+from maas_collector.rawdata.configprovider import ConfigValidationError
 
 from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 
@@ -448,6 +449,28 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         self.ko_manager = KOManagerThread(self.configs[0])
         self.ko_manager.start()
+
+    def validate_config(self, sources: list) -> None:
+        """setup() stops when the monitoring entry is missing: refuse a new
+        configuration without it rather than restart into that failure
+
+        Args:
+            sources (list[ConfigSource]): the new configuration
+
+        Raises:
+            ConfigValidationError: when no source holds the monitoring entry
+        """
+        name = self.monitor_config.interface_name
+
+        for source in sources:
+            for meta in source.content.get("collectors", []):
+                if meta.get("interface_name") == name:
+                    return
+
+        raise ConfigValidationError(
+            self.args.config_store.service if self.args.config_store else "monitor",
+            f"no monitoring configuration with name {name}",
+        )
 
     def config_classes_for(self, meta: dict) -> list:
         """a probed entry of a new configuration must also build with the

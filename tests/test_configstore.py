@@ -212,6 +212,26 @@ def test_credential_file_content_is_refused(store, client):
     assert client.documents.get(INDEX, {}) == {}
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"amqp": {"new.raw.data": 5}},
+        {"amqp": ["new.raw.data"]},
+        {"amqp": {"new.raw.data": {"chunk_size": "5"}}},
+        {"amqp": {"new.raw.data": {"chunk_size": 0}}},
+        {"collectors": {}},
+        {"collectors": None},
+        {"models": None},
+    ],
+)
+def test_content_the_collector_could_not_start_on_is_refused(store, client, bad):
+    """a content refused at startup would make a restart loop"""
+    with pytest.raises(ConfigValidationError, match=PATH):
+        store.publish(PATH, bad, ["odata"], "alice", "oops")
+
+    assert client.documents.get(INDEX, {}) == {}
+
+
 def test_unknown_extractor_class_is_refused(store):
     bad = content(extractor_class="NoSuchExtractor")
 

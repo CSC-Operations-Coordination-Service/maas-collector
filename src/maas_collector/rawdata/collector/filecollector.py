@@ -425,6 +425,17 @@ class FileCollector(CredentialMixin):
         # handle optionnal credential source
         self.load_credentials()
 
+    def validate_config(self, sources: list) -> None:
+        """check what setup() requires of a new configuration beyond loading it.
+        Overridden by collectors whose setup() needs more.
+
+        Args:
+            sources (list[ConfigSource]): the new configuration
+
+        Raises:
+            ConfigValidationError: when setup() would refuse it
+        """
+
     def config_classes_for(self, meta: dict) -> list:
         """configuration classes a collector entry of a new configuration must build
         with before the collector restarts on it
@@ -491,6 +502,7 @@ class FileCollector(CredentialMixin):
 
         try:
             validate_config_sources(sources, self.config_classes_for)
+            self.validate_config(sources)
         except ConfigValidationError as error:
             self.logger.error("configuration change rejected: %s", error)
             self._rejected_config_fingerprint = fingerprint

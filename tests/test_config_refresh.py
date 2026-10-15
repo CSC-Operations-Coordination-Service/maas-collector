@@ -396,6 +396,45 @@ def test_monitor_rejects_a_probed_entry_its_collector_cannot_load(
     assert "configuration change rejected: odata/basic.json@2: KeyError" in caplog.text
 
 
+def test_monitor_rejects_a_configuration_without_its_monitoring_entry(
+    clock, fake_opensearch, caplog
+):
+    """setup() stops when the monitoring entry is missing: a change dropping it
+    would make a restart loop"""
+    store = ConfigStore(fake_opensearch, INDEX)
+    store.publish(
+        "monitor/main.json", read_json(MONITOR_CONF), ["monitor-main"], "a", "v1"
+    )
+    monitor = InterfaceMonitor(
+        CollectorArgs(
+            es_url="http://opensearch.example:9200",
+            config_backend="opensearch",
+            config_store=ConfigStoreArgs(index=INDEX, service="monitor-main"),
+            credential_file=CREDENTIAL_FILE,
+        ),
+        InterfaceMonitorConfiguration(interface_name="OMCS_Monitoring"),
+    )
+    with patch("opensearchpy.connection.connections.Connections.create_connection"):
+        monitor.setup()
+
+    renamed = read_json(MONITOR_CONF)
+    renamed["collectors"][0]["interface_name"] = "Renamed_Monitoring"
+    add_config_document(
+        fake_opensearch, "monitor/main.json", 2, ["monitor-main"], renamed
+    )
+
+    try:
+        clock.now += 300
+        monitor.check_config_changes()
+    finally:
+        monitor.exit_gracefully(9, "")
+
+    assert (
+        "configuration change rejected: monitor-main: no monitoring configuration"
+        " with name OMCS_Monitoring" in caplog.text
+    )
+
+
 MONITOR_RESTART_SCRIPT = """
 import json
 import sys
