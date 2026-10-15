@@ -30,10 +30,12 @@ from maas_collector.health.serverthread import ServerThread
 from maas_collector.rawdata.backup_report import BackupReportWriter
 from maas_collector.rawdata.model import ActionIterator
 from maas_collector.rawdata import extractor
-from maas_collector.rawdata.configuration import (
-    load_json as load_configuration_json,
-    get_model,
-    find_configurations,
+from maas_collector.rawdata.configuration import load_json_dict, get_model
+from maas_collector.rawdata.configprovider import (
+    ConfigProvider,
+    ConfigSource,
+    ConfigStoreArgs,
+    build_config_provider,
 )
 
 from maas_collector.rawdata.messenger import Messenger
@@ -98,6 +100,15 @@ class CollectorArgs:
     healthcheck_timeout: int = None
 
     es_ignore_certs_verification: bool = False
+
+    # where the configuration is read from: file (rawdata_config and
+    # rawdata_config_dir) or opensearch (config_store)
+    config_backend: str = "file"
+
+    # seconds between two checks for a configuration change, 0 never checks
+    config_refresh_period: int = 300
+
+    config_store: ConfigStoreArgs = None
 
 
 @dataclasses.dataclass
@@ -323,39 +334,42 @@ class FileCollector(CredentialMixin):
         self._action_iterator = None
         self.action_iterator_errors = []
 
-        # list of configuration files
-        self.__config_files = None
+        # configuration sources the configurations were built from
+        self.config_sources: list[ConfigSource] = []
 
-    def get_configs(self, path: str):
-        """get configurations of a given class from a json file
+        # fingerprint of config_sources, None when they cannot change
+        self._config_fingerprint = None
+
+    @cached_property
+    def config_provider(self) -> ConfigProvider:
+        """where the configuration is read from"""
+        return build_config_provider(self.args)
+
+    def get_configs(self, source: ConfigSource) -> list:
+        """build the configurations of a configuration source, and register its
+        models
 
         Args:
-            path ([str]): path of the configuration file
-            config_class ([type]): config class object
-
-        Raises:
-            ValueError: when no configuration is available
+            source (ConfigSource): content of a configuration file
 
         Returns:
-            [type]: list of configuration objects
+            list: configuration objects, none for a model-only or amqp-only source
         """
-        # load raw data mapping
-        configs = load_configuration_json(path, self.CONFIG_CLASS)
-
-        if not configs:
-            msg = f"No config declared in {path}"
-            self.logger.error(msg)
-            raise ValueError(msg)
-
-        return configs
+        return list(load_json_dict(source.content, self.CONFIG_CLASS, source.name))
 
     def load_config(self):
         """populate configuration for pattern matching and routing configuration"""
         self.configs.clear()
-        for path in self.config_files:
-            self.configs.extend(self.get_configs(path))
 
-            self._messenger.load_config_file(path)
+        sources = self.config_provider.load()
+
+        for source in sources:
+            self.configs.extend(self.get_configs(source))
+
+            self._messenger.load_config_dict(source.content, source.name)
+
+        self.config_sources = sources
+        self._config_fingerprint = self.config_provider.fingerprint(sources)
 
         # resolve model
         for config in self.configs:
@@ -395,37 +409,10 @@ class FileCollector(CredentialMixin):
         # handle optionnal credential source
         self.load_credentials()
 
-    @property
-    def config_files(self) -> list[str]:
-        """lazy create  the list of configuration files
-
-        Returns:
-            list[str]: list of path
-        """
-        if self.__config_files is None:
-            # lazy create the list
-            self.__config_files = []
-
-            # single file
-            if self.args.rawdata_config:
-                self.__config_files.append(self.args.rawdata_config)
-
-            # directory
-            if self.args.rawdata_config_dir:
-                self.__config_files.extend(
-                    find_configurations(self.args.rawdata_config_dir)
-                )
-
-        return self.__config_files
-
     def setup(self):
-        """Load rawdata extraction configuration, connect to AMQP and opensearch"""
-        # load json configuration
-        self.load_config()
-
-        # connect to amqp
-        # self._messenger.setup()
-
+        """Connect to opensearch, load rawdata extraction configuration"""
+        # the connection comes first: the opensearch configuration backend reads
+        # through it. Connections are lazy, so the file backend opens nothing.
         self.logger.info(
             "Setup connection to opensearch to with %d max retries / timeout=%s",
             self.args.es_retries,
@@ -439,6 +426,9 @@ class FileCollector(CredentialMixin):
             verify_certs=not self.args.es_ignore_certs_verification,
             ssl_show_warn=not self.args.es_ignore_certs_verification,
         )
+
+        # load json configuration
+        self.load_config()
 
         # connect signal to exit gracefully
         signal.signal(signal.SIGINT, self.exit_gracefully)
