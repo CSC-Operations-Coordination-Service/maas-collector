@@ -35,7 +35,10 @@ from maas_collector.rawdata.configprovider import (
     ConfigProvider,
     ConfigSource,
     ConfigStoreArgs,
+    ConfigValidationError,
     build_config_provider,
+    describe_config_changes,
+    validate_config_sources,
 )
 
 from maas_collector.rawdata.messenger import Messenger
@@ -45,6 +48,9 @@ from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 from maas_collector.rawdata.collector.credentialprovider import VaultArgs
 
 from maas_collector.rawdata.meta import IngestionMeta
+
+# exit code of a collector that stops to restart on a new configuration: EX_TEMPFAIL
+CONFIG_CHANGED_EXIT_CODE = 75
 
 
 # collector classes need many attributes
@@ -340,6 +346,15 @@ class FileCollector(CredentialMixin):
         # fingerprint of config_sources, None when they cannot change
         self._config_fingerprint = None
 
+        # time.monotonic() of the last configuration check
+        self._config_check_time: float = None
+
+        # fingerprint of the last rejected configuration, not checked again
+        self._rejected_config_fingerprint = None
+
+        # True while the configuration checks fail, to log one traceback per outage
+        self._config_check_failing = False
+
     @cached_property
     def config_provider(self) -> ConfigProvider:
         """where the configuration is read from"""
@@ -370,6 +385,7 @@ class FileCollector(CredentialMixin):
 
         self.config_sources = sources
         self._config_fingerprint = self.config_provider.fingerprint(sources)
+        self._config_check_time = time.monotonic()
 
         # resolve model
         for config in self.configs:
@@ -408,6 +424,84 @@ class FileCollector(CredentialMixin):
 
         # handle optionnal credential source
         self.load_credentials()
+
+    def config_classes_for(self, meta: dict) -> list:
+        """configuration classes a collector entry of a new configuration must build
+        with before the collector restarts on it
+
+        Args:
+            meta (dict): collector entry
+
+        Returns:
+            list: configuration classes
+        """
+        return [self.CONFIG_CLASS]
+
+    def check_config_changes(self):
+        """read the configuration again once the refresh period has elapsed, and exit
+        with CONFIG_CHANGED_EXIT_CODE when it changed, for the orchestrator to
+        restart the collector on it.
+
+        A failing read is logged and the collector keeps its configuration: it is
+        retried at the next period. A new configuration the collector cannot load
+        is logged and ignored until it changes again.
+
+        Raises:
+            SystemExit: with CONFIG_CHANGED_EXIT_CODE when the configuration changed
+        """
+        if (
+            self._config_check_time is None
+            or self._config_fingerprint is None
+            or self.args.config_refresh_period <= 0
+        ):
+            return
+
+        if time.monotonic() - self._config_check_time < self.args.config_refresh_period:
+            return
+
+        self._config_check_time = time.monotonic()
+
+        try:
+            sources = self.config_provider.load()
+
+        # a failing configuration source shall not stop the collect
+        # pylint: disable=W0703
+        except Exception as error:
+            if self._config_check_failing:
+                self.logger.error(
+                    "Cannot check the configuration, keeping the current one: %s",
+                    error,
+                )
+            else:
+                self.logger.exception(
+                    "Cannot check the configuration, keeping the current one"
+                )
+
+            self._config_check_failing = True
+            return
+
+        if self._config_check_failing:
+            self.logger.info("Configuration checked again")
+            self._config_check_failing = False
+
+        fingerprint = self.config_provider.fingerprint(sources)
+
+        if fingerprint in (self._config_fingerprint, self._rejected_config_fingerprint):
+            return
+
+        try:
+            validate_config_sources(sources, self.config_classes_for)
+        except ConfigValidationError as error:
+            self.logger.error("configuration change rejected: %s", error)
+            self._rejected_config_fingerprint = fingerprint
+            return
+
+        self.logger.warning(
+            "configuration changed: %s, restarting",
+            describe_config_changes(self.config_sources, sources),
+        )
+
+        raise SystemExit(CONFIG_CHANGED_EXIT_CODE)
 
     def setup(self):
         """Connect to opensearch, load rawdata extraction configuration"""
@@ -794,6 +888,10 @@ class FileCollector(CredentialMixin):
                 # pick up rotated credentials. Not in on_loop_start so overrides
                 # cannot skip it
                 self.refresh_credentials()
+
+                # restart on a new configuration, between two loops. Not in
+                # on_loop_start so overrides cannot skip it
+                self.check_config_changes()
 
                 # call template method
                 self.on_loop_start()

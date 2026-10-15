@@ -323,3 +323,28 @@ def validate_config_sources(
                     f"model {model_name} is defined in none of the configuration"
                     " files",
                 )
+
+
+def describe_config_changes(previous: list, current: list) -> str:
+    """Summarize the difference between two sets of sources, for the logs
+
+    Args:
+        previous (list[ConfigSource]): sources the collector runs on
+        current (list[ConfigSource]): sources read now
+
+    Returns:
+        str: like "odata/a.json v3→v4, odata/b.json added, odata/c.json removed"
+    """
+    before = {source.name: source.version for source in previous}
+    after = {source.name: source.version for source in current}
+
+    changes = []
+    for name in sorted(before.keys() | after.keys()):
+        if name not in before:
+            changes.append(f"{name} added")
+        elif name not in after:
+            changes.append(f"{name} removed")
+        elif before[name] != after[name]:
+            changes.append(f"{name} v{before[name]}→v{after[name]}")
+
+    return ", ".join(changes)
