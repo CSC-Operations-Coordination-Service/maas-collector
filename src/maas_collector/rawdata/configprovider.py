@@ -10,16 +10,42 @@ import abc
 import dataclasses
 import json
 import logging
+import typing
 
 from opensearchpy.connection.connections import connections as es_connections
 from opensearchpy.exceptions import NotFoundError
 from opensearchpy.helpers import scan
 
-from maas_collector.rawdata.configuration import find_configurations
+from maas_collector.rawdata.configuration import (
+    build_collector_configuration,
+    build_model_class,
+    find_configurations,
+)
 
 LOGGER = logging.getLogger("ConfigProvider")
 
 DEFAULT_CONFIG_INDEX = "maas-collector-config"
+
+# top-level keys of a configuration file. A credential file, {"interfaces": ...},
+# has none of them.
+CONFIG_KEYS = frozenset({"collectors", "models", "amqp"})
+
+
+class ConfigValidationError(ValueError):
+    """a configuration source that a collector cannot load"""
+
+    def __init__(self, label: str, reason: str):
+        super().__init__(f"{label}: {reason}")
+
+        self.label = label
+
+        self.reason = reason
+
+
+def is_config_content(content) -> bool:
+    """True for the content of a configuration file: a JSON object whose top-level
+    keys are within collectors, models and amqp"""
+    return isinstance(content, dict) and set(content) <= CONFIG_KEYS
 
 
 @dataclasses.dataclass
@@ -227,3 +253,73 @@ def build_config_provider(args) -> ConfigProvider:
     raise ValueError(
         f"Unknown configuration backend {backend}: expected file or opensearch"
     )
+
+
+def validate_config_sources(
+    sources: list,
+    config_classes_for: typing.Callable[[dict], list],
+    resolve_models: bool = True,
+) -> None:
+    """Check that collectors can load configuration sources, without changing the
+    models the running process has registered
+
+    Args:
+        sources (list[ConfigSource]): sources to check
+        config_classes_for (Callable[[dict], list]): configuration classes each
+            collector entry must build with
+        resolve_models (bool, optional): check that every model named by a collector
+            entry or a backup report is defined by one of the sources. Off to check
+            a single file, whose models may live in another file. Defaults to True.
+
+    Raises:
+        ConfigValidationError: on the first source that cannot be loaded
+    """
+    defined = set()
+    referenced = []
+
+    for source in sources:
+        content = source.content
+
+        if not is_config_content(content):
+            keys = sorted(content) if isinstance(content, dict) else []
+            raise ConfigValidationError(
+                source.label,
+                f"not a collector configuration: top-level keys {keys},"
+                f" expected within {sorted(CONFIG_KEYS)}",
+            )
+
+        try:
+            for meta in content.get("collectors", []):
+                for configuration_class in config_classes_for(meta):
+                    build_collector_configuration(
+                        meta, configuration_class, register=False
+                    )
+
+                if isinstance(meta.get("model"), dict):
+                    defined.add(meta["model"]["name"])
+                elif meta.get("model"):
+                    referenced.append((source.label, meta["model"]))
+
+                backup = meta.get("backup")
+                if isinstance(backup, dict) and backup.get("report_model"):
+                    referenced.append((source.label, backup["report_model"]))
+
+            for model_meta in content.get("models", []):
+                build_model_class(model_meta, register=False)
+                defined.add(model_meta["name"])
+
+        # any error makes the source unusable: report it with the source label
+        # pylint: disable=W0703
+        except Exception as error:
+            raise ConfigValidationError(
+                source.label, f"{error.__class__.__name__}: {error}"
+            ) from error
+
+    if resolve_models:
+        for label, model_name in referenced:
+            if model_name not in defined:
+                raise ConfigValidationError(
+                    label,
+                    f"model {model_name} is defined in none of the configuration"
+                    " files",
+                )
