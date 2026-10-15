@@ -31,8 +31,15 @@
   it, refuses credential files, and refuses a publication based on an outdated
   version. It reads the OpenSearch connection like the collectors, including
   `ES_VAULT_PATH`.
+- A version is refused when the collectors could not start on it: an `amqp` section
+  that is not an object of routing keys to objects with a positive integer
+  `chunk_size`, `collectors` or `models` that are not lists, or, for the interface
+  monitor, a set without its monitoring entry. A service name is a single directory
+  name (`odata`, `monitor-main`), and `export` skips any document that would be
+  written outside its output directory.
 - The interface monitor finds the configurations of the interfaces it probes among
-  the files of its own service.
+  the files of its own service. It now stops its probe retries when it exits, so a
+  restart on a new configuration does not leave the process hanging.
 - Write access to the index means code execution in the collectors, as
   configurations hold Python lambdas: give the collectors read-only access. New
   `docs/opensearch_config.md` covers the documents, the CLI, the move from files, the
@@ -47,6 +54,9 @@
   `config_files` property is replaced by `config_provider` and `config_sources`.
   `configuration.load_json()` and `Messenger.load_config_file()` are unchanged, and
   rely on the new `load_json_dict()` and `load_config_dict()`.
+- The chunk sizes of a configuration file are checked: a malformed `amqp` section,
+  which used to fail with a `TypeError` or an `AttributeError`, now stops the
+  collector with a `ValueError` naming the routing key.
 
 ### Requirements and upgrade
 
