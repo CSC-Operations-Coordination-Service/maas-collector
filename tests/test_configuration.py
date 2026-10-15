@@ -1,3 +1,4 @@
+import json
 import os
 
 from maas_collector.rawdata import configuration
@@ -75,3 +76,58 @@ def test_postponed_models():
     assert set(config.name for config in c.configs) == set(
         ["PostPonedModel1Configuration", "PostPonedModel2Configuration"]
     )
+
+
+def read_json(path):
+    with open(path, encoding="UTF-8") as conf_fd:
+        return json.load(conf_fd)
+
+
+def test_load_json_dict_builds_the_same_configurations_as_load_json():
+    from_file = list(configuration.load_json(CONF1, FileCollectorConfiguration))
+
+    from_dict = list(
+        configuration.load_json_dict(
+            read_json(CONF1), FileCollectorConfiguration, "conf1.json"
+        )
+    )
+
+    assert [config.name for config in from_dict] == [
+        config.name for config in from_file
+    ]
+    assert from_dict[0].model_meta == from_file[0].model_meta
+
+
+def test_load_json_dict_registers_the_models_of_a_model_only_content():
+    content = {"models": [{"name": "DictOnlyModel", "index": "", "fields": []}]}
+
+    configs = list(
+        configuration.load_json_dict(content, FileCollectorConfiguration, "models")
+    )
+
+    assert configs == []
+    assert configuration.MODEL_DICT["DictOnlyModel"].__name__ == "DictOnlyModel"
+
+
+def test_unregistered_models_leave_model_dict_untouched():
+    before = dict(configuration.MODEL_DICT)
+    content = {
+        "collectors": [
+            {
+                "id_field": "",
+                "routing_key": "",
+                "model": {"name": "InlineCheckedModel", "index": "", "fields": []},
+                "extractor": {"class": "LogExtractor", "args": {"pattern": ".*"}},
+            }
+        ],
+        "models": [{"name": "SharedCheckedModel", "index": "", "fields": []}],
+    }
+
+    configs = list(
+        configuration.load_json_dict(
+            content, FileCollectorConfiguration, "check", register=False
+        )
+    )
+
+    assert configs[0].model.__name__ == "InlineCheckedModel"
+    assert configuration.MODEL_DICT == before

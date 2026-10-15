@@ -152,32 +152,41 @@ class Messenger:
         with open(path, "r", encoding="UTF-8") as config_fd:
             json_config = json.load(config_fd)
 
-            if "amqp" not in json_config:
-                # not amqp setting
-                return
+        self.load_config_dict(json_config, path)
 
-            for routing_key, routing_info in json_config["amqp"].items():
-                if not "chunk_size" in routing_info:
-                    continue
+    def load_config_dict(self, json_dict: dict, source: str):
+        """Load amqp configuration from the content of a configuration file
 
-                # log overwrite
-                if routing_key in self.chunk_config:
-                    # log redeclare
-                    self.logger.warning(
-                        "%s: overwrite chunk size config for %s from %s to %s",
-                        path,
-                        routing_key,
-                        self.chunk_config[routing_key],
-                        routing_info["chunk_size"],
-                    )
+        Args:
+            json_dict (dict): configuration content, {collectors?, models?, amqp?}
+            source (str): name of the content, for the logs
+        """
+        if "amqp" not in json_dict:
+            # not amqp setting
+            return
 
-                self.logger.info(
-                    "Set chunk configuration for %s: %d",
+        for routing_key, routing_info in json_dict["amqp"].items():
+            if not "chunk_size" in routing_info:
+                continue
+
+            # log overwrite
+            if routing_key in self.chunk_config:
+                # log redeclare
+                self.logger.warning(
+                    "%s: overwrite chunk size config for %s from %s to %s",
+                    source,
                     routing_key,
+                    self.chunk_config[routing_key],
                     routing_info["chunk_size"],
                 )
 
-                self.chunk_config[routing_key] = routing_info["chunk_size"]
+            self.logger.info(
+                "Set chunk configuration for %s: %d",
+                routing_key,
+                routing_info["chunk_size"],
+            )
+
+            self.chunk_config[routing_key] = routing_info["chunk_size"]
 
     def handle_message(self, config, document_id: str, index: str | None = None):
         """handle a document identifier and decide to send it (or not) on the message
