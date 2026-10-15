@@ -133,6 +133,69 @@ class FileConfigProvider(ConfigProvider):
         return sources
 
 
+# paths per terms query when reading the current versions of candidate paths
+PATH_CHUNK_SIZE = 1024
+
+
+def current_documents(client, index: str, service: str = "", interface: str = ""):
+    """current version of every path, tombstones included, sorted by path.
+
+    The current version of a path is its highest version among the documents
+    flagged latest: two of them exist between the two steps of a publish. It is
+    picked before the service and interface filters apply, so a newer version that
+    drops the service hides the older one that still names it.
+
+    Args:
+        client: opensearch-py client
+        index (str): configuration index
+        service (str, optional): only the paths whose current version names it
+        interface (str, optional): only the paths whose current version declares it
+
+    Raises:
+        opensearchpy.exceptions.NotFoundError: when the index does not exist
+
+    Returns:
+        list[dict]: documents
+    """
+    latest = {"term": {"latest": True}}
+
+    candidate_filters = [latest]
+    if service:
+        candidate_filters.append({"term": {"services": service}})
+    if interface:
+        candidate_filters.append({"term": {"interface_names": interface}})
+
+    candidates = sorted(
+        {
+            hit["_source"]["path"]
+            for hit in scan(
+                client,
+                index=index,
+                query={"query": {"bool": {"filter": candidate_filters}}},
+            )
+        }
+    )
+
+    newest = {}
+
+    for start in range(0, len(candidates), PATH_CHUNK_SIZE):
+        paths = candidates[start : start + PATH_CHUNK_SIZE]
+        query = {"query": {"bool": {"filter": [latest, {"terms": {"path": paths}}]}}}
+
+        for hit in scan(client, index=index, query=query):
+            document = hit["_source"]
+            current = newest.get(document["path"])
+            if current is None or document["version"] > current["version"]:
+                newest[document["path"]] = document
+
+    return [
+        newest[path]
+        for path in sorted(newest)
+        if (not service or service in newest[path]["services"])
+        and (not interface or interface in newest[path].get("interface_names", []))
+    ]
+
+
 class OpenSearchConfigProvider(ConfigProvider):
     """Latest configuration documents of a service, in a maas-collector-config index.
 
@@ -167,25 +230,8 @@ class OpenSearchConfigProvider(ConfigProvider):
         Returns:
             list[ConfigSource]: sources sorted by path
         """
-        query = {
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"latest": True}},
-                        {"term": {"services": self.service}},
-                    ]
-                }
-            }
-        }
-
-        newest = {}
-
         try:
-            for hit in scan(self.client, index=self.index, query=query):
-                document = hit["_source"]
-                current = newest.get(document["path"])
-                if current is None or document["version"] > current["version"]:
-                    newest[document["path"]] = document
+            documents = current_documents(self.client, self.index, self.service)
         except NotFoundError as error:
             raise ValueError(
                 f"no configuration for service {self.service} in index {self.index}:"
@@ -193,9 +239,9 @@ class OpenSearchConfigProvider(ConfigProvider):
             ) from error
 
         sources = [
-            ConfigSource(path, newest[path]["content"], newest[path]["version"])
-            for path in sorted(newest)
-            if not newest[path].get("deleted")
+            ConfigSource(document["path"], document["content"], document["version"])
+            for document in documents
+            if not document.get("deleted")
         ]
 
         if not sources:

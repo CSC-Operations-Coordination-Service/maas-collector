@@ -21,6 +21,7 @@ from maas_collector.rawdata.collector.monitorcollector import (
 from maas_collector.rawdata.configprovider import (
     DEFAULT_CONFIG_INDEX,
     ConfigSource,
+    current_documents,
     validate_config_sources,
 )
 from maas_collector.rawdata.implementation import (
@@ -215,19 +216,10 @@ class ConfigStore:
             service (str, optional): only the paths tagged with this service
             interface (str, optional): only the paths declaring this interface
         """
-        filters = [{"term": {"latest": True}}]
-        if service:
-            filters.append({"term": {"services": service}})
-        if interface:
-            filters.append({"term": {"interface_names": interface}})
-
-        newest = {}
-        for doc in self._scan({"bool": {"filter": filters}}):
-            current = newest.get(doc["path"])
-            if current is None or doc["version"] > current["version"]:
-                newest[doc["path"]] = doc
-
-        return [newest[path] for path in sorted(newest)]
+        try:
+            return current_documents(self.client, self.index, service, interface)
+        except NotFoundError:
+            return []
 
     # the audit fields make a long but explicit signature
     # pylint: disable=too-many-arguments

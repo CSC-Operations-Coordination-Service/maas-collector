@@ -319,3 +319,12 @@ def test_bad_paths_are_refused(store, client, path):
         store.publish(path, content(), ["odata"], "alice", "v1")
 
     assert client.documents.get(INDEX, {}) == {}
+
+
+def test_latest_of_a_service_follows_a_newer_version_without_it(store, client):
+    """list --service shows what the collectors of the service load"""
+    add_config_document(client, "shared.json", 1, ["odata", "sftp"], content())
+    add_config_document(client, "shared.json", 2, ["sftp"], content())
+
+    assert store.latest(service="odata") == []
+    assert [doc["version"] for doc in store.latest(service="sftp")] == [2]

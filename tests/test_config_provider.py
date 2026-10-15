@@ -176,6 +176,22 @@ def test_opensearch_provider_hides_a_path_whose_tombstone_is_not_alone(
     assert [source.name for source in sources] == ["odata/a.json"]
 
 
+def test_opensearch_provider_follows_a_newer_version_without_its_service(
+    fake_opensearch,
+):
+    """between the two steps of a publish that drops the service, the previous
+    version is still latest but no longer the current one"""
+    add_config_document(fake_opensearch, "odata/keep.json", 1, ["odata"], {})
+    add_config_document(fake_opensearch, "shared.json", 1, ["odata", "sftp"], {})
+    add_config_document(fake_opensearch, "shared.json", 2, ["sftp"], {})
+
+    odata = OpenSearchConfigProvider(INDEX, "odata").load()
+    sftp = OpenSearchConfigProvider(INDEX, "sftp").load()
+
+    assert [source.label for source in odata] == ["odata/keep.json@1"]
+    assert [source.label for source in sftp] == ["shared.json@2"]
+
+
 def test_opensearch_provider_order_is_stable(fake_opensearch):
     for path in ("odata/z.json", "odata/a.json", "odata/m/b.json"):
         add_config_document(fake_opensearch, path, 1, ["odata"], {})
