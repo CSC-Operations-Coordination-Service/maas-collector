@@ -292,6 +292,15 @@ def test_publish_needs_a_service(store):
         store.publish(PATH, content(), [], "alice", "v1")
 
 
+@pytest.mark.parametrize("service", ["", "../escaped", "/abs", "a/b", ".hidden"])
+def test_bad_service_names_are_refused(store, client, service):
+    """a service name becomes a directory of export: it must stay one name"""
+    with pytest.raises(ValueError, match="bad service name"):
+        store.publish(PATH, content(), ["odata", service], "alice", "v1")
+
+    assert client.documents.get(INDEX, {}) == {}
+
+
 @pytest.mark.parametrize(
     "path",
     [

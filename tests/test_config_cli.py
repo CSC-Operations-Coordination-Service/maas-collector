@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
+from fakeopensearch import add_config_document
+
 from maas_collector.rawdata.cli.config import config_main
 from maas_collector.rawdata.configstore import ConfigStore
 
@@ -193,6 +195,32 @@ def test_export_of_one_service(env, deploy_dir, tmp_path):
 
     assert os.listdir(tmp_path / "out") == ["sftp"]
     assert os.path.isfile(tmp_path / "out" / "sftp" / "shared" / "conf1.json")
+
+
+@pytest.mark.parametrize(
+    "path, services",
+    [
+        ("../../escaped-via-path.json", ["odata"]),
+        ("odata/x.json", ["../escaped-via-service"]),
+        ("odata/y.json", ["/abs-service"]),
+    ],
+)
+def test_export_never_writes_outside_its_directory(
+    env, fake_opensearch, tmp_path, capsys, path, services
+):
+    """documents written by hand in the index can carry any path or service"""
+    add_config_document(fake_opensearch, path, 1, services, {"amqp": {}})
+    out_dir = tmp_path / "exp" / "out"
+
+    assert run("export", out_dir) == 1
+
+    written = [
+        os.path.join(directory, name)
+        for directory, _, names in os.walk(tmp_path)
+        for name in names
+    ]
+    assert written == []
+    assert "skipped" in capsys.readouterr().err
 
 
 def test_put_a_new_path_needs_its_services(env, store, tmp_path, capsys):

@@ -9,6 +9,7 @@ the index (see configprovider.OpenSearchConfigProvider).
 
 import datetime
 import logging
+import re
 
 from opensearchpy.exceptions import ConflictError, NotFoundError
 from opensearchpy.helpers import scan
@@ -77,6 +78,23 @@ def check_path(path: str):
         raise ValueError(
             f"bad configuration path {path!r}: expected a relative path like"
             " odata/prip/conf.json, with / separators and no . or .. segment"
+        )
+
+
+# a service name is also a directory of export: a single name, no path
+SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def check_service(service: str):
+    """A service name is a deploy service directory name: odata, monitor-main
+
+    Raises:
+        ValueError: on an empty name, or one that is not a single directory name
+    """
+    if not isinstance(service, str) or not SERVICE_NAME.fullmatch(service):
+        raise ValueError(
+            f"bad service name {service!r}: expected a single directory name like"
+            " odata or monitor-main"
         )
 
 
@@ -268,6 +286,9 @@ class ConfigStore:
         services = sorted(set(services))
         if not services:
             raise ValueError(f"{path}: a configuration needs at least one service")
+
+        for service in services:
+            check_service(service)
 
         version = current + 1
         interface_names, model_names = content_names(content)

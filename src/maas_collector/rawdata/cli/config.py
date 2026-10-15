@@ -34,6 +34,8 @@ from maas_collector.rawdata.configstore import (
     ConfigConflictError,
     ConfigNotFoundError,
     ConfigStore,
+    check_path,
+    check_service,
     config_classes_for,
 )
 
@@ -299,6 +301,8 @@ def import_command(store: ConfigStore, namespace) -> int:
 def export_command(store: ConfigStore, namespace) -> int:
     """write the current versions back as a deploy tree"""
     count = 0
+    skipped = 0
+    root = os.path.realpath(namespace.out_dir)
 
     for document in store.latest(service=namespace.service):
         if document["deleted"]:
@@ -308,9 +312,23 @@ def export_command(store: ConfigStore, namespace) -> int:
             if namespace.service and service != namespace.service:
                 continue
 
-            target = os.path.join(
-                namespace.out_dir, service, *document["path"].split("/")
-            )
+            # a document written by hand in the index can carry any path or
+            # service: never write outside the output directory
+            try:
+                check_path(document["path"])
+                check_service(service)
+            except ValueError as error:
+                print(f"skipped: {error}", file=sys.stderr)
+                skipped += 1
+                continue
+
+            target = os.path.join(root, service, *document["path"].split("/"))
+
+            if not os.path.realpath(target).startswith(root + os.sep):
+                print(f"skipped: {target} is outside {root}", file=sys.stderr)
+                skipped += 1
+                continue
+
             os.makedirs(os.path.dirname(target), exist_ok=True)
 
             with open(target, "w", encoding="UTF-8") as out_fd:
@@ -320,7 +338,7 @@ def export_command(store: ConfigStore, namespace) -> int:
             count += 1
 
     print(f"exported {count} files to {namespace.out_dir}")
-    return 0
+    return 1 if skipped else 0
 
 
 def list_command(store: ConfigStore, namespace) -> int:
