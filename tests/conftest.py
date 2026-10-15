@@ -16,11 +16,23 @@ from requests.exceptions import ConnectionError as RequestConnectionError
 
 from maas_model.testing.fakevault import FakeVault
 
+from fakeopensearch import FakeOpenSearch
+
 
 @pytest.fixture
 def mock_client():
     client = Mock()
     es_connections.add_connection("mock", client)
+    yield client
+    es_connections._conn = {}
+    es_connections._kwargs = {}
+
+
+@pytest.fixture
+def fake_opensearch():
+    """an in-memory OpenSearch, registered as the default connection"""
+    client = FakeOpenSearch()
+    es_connections.add_connection("default", client)
     yield client
     es_connections._conn = {}
     es_connections._kwargs = {}

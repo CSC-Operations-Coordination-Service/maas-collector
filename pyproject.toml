@@ -8,4 +8,4 @@ build-backend = "setuptools.build_meta"
 version_scheme = "no-guess-dev"
 # Used only when the version can't be derived from git (e.g. the shallow
 # CI test checkout with no tags). A real tag (x.y.z) always wins over this.
-fallback_version = "3.11.0"
+fallback_version = "3.12.0"

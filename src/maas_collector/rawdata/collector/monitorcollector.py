@@ -35,10 +35,8 @@ from maas_collector.rawdata.implementation import (
     get_collector_class_by_config_classname,
 )
 
-from maas_collector.rawdata.configuration import (
-    load_json as load_configuration_json,
-    find_configurations,
-)
+from maas_collector.rawdata.configuration import load_json_dict
+from maas_collector.rawdata.configprovider import ConfigValidationError
 
 from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 
@@ -229,10 +227,9 @@ class RetryThread(Thread):
     def run(self):
         """Entry point"""
         for _ in range(self.count):
-            if self.shall_stop_event.is_set():
+            # an event wait, not a sleep: stopping does not wait for the interval
+            if self.shall_stop_event.wait(self.interval):
                 break
-
-            time.sleep(self.interval)
 
             self.last_start = datetime.datetime.now(tz=datetime.UTC)
 
@@ -382,24 +379,22 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         meta_list: List[InterfaceMeta] = []
 
-        # load the configurations of the interfaces to monitor
-        for config_path in find_configurations(self.args.rawdata_config_dir):
-            with open(config_path, mode="r", encoding="UTF-8") as conf_obj:
-                conf_dict = json.load(conf_obj)
+        # load the configurations of the interfaces to monitor, from the sources
+        # the monitoring configuration came from
+        for source in self.config_sources:
+            self.logger.debug("Looking in %s", source.name)
 
-            self.logger.debug("Looking in %s", config_path)
-
-            for collect_conf_dict in conf_dict.get("collectors", []):
+            for collect_conf_dict in source.content.get("collectors", []):
                 if not collect_conf_dict.get("class"):
                     self.logger.info(
                         "Class property empty. Ignoring some configuration in %s",
-                        config_path,
+                        source.name,
                     )
                     continue
 
                 if collect_conf_dict["class"] == self.CONFIG_CLASS.__name__:
                     self.logger.debug(
-                        "Ignoring InterfaceMonitorConfiguration: %s", config_path
+                        "Ignoring InterfaceMonitorConfiguration: %s", source.name
                     )
                     continue
 
@@ -409,8 +404,8 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
                 config = [
                     config
-                    for config in load_configuration_json(
-                        config_path, collector_class.CONFIG_CLASS
+                    for config in load_json_dict(
+                        source.content, collector_class.CONFIG_CLASS, source.name
                     )
                     if config.interface_name == collect_conf_dict["interface_name"]
                 ][0]
@@ -423,7 +418,7 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
                 interface_meta = InterfaceMeta(
                     name=collect_conf_dict["interface_name"],
-                    configuration_path=config_path,
+                    configuration_path=source.name,
                     config=config,
                     probe_callable=collector_class.probe,
                 )
@@ -454,6 +449,47 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
         self.ko_manager = KOManagerThread(self.configs[0])
         self.ko_manager.start()
+
+    def validate_config(self, sources: list) -> None:
+        """setup() stops when the monitoring entry is missing: refuse a new
+        configuration without it rather than restart into that failure
+
+        Args:
+            sources (list[ConfigSource]): the new configuration
+
+        Raises:
+            ConfigValidationError: when no source holds the monitoring entry
+        """
+        name = self.monitor_config.interface_name
+
+        for source in sources:
+            for meta in source.content.get("collectors", []):
+                if meta.get("interface_name") == name:
+                    return
+
+        raise ConfigValidationError(
+            self.args.config_store.service if self.args.config_store else "monitor",
+            f"no monitoring configuration with name {name}",
+        )
+
+    def config_classes_for(self, meta: dict) -> list:
+        """a probed entry of a new configuration must also build with the
+        configuration class of its own collector, as setup() builds it so
+
+        Args:
+            meta (dict): collector entry
+
+        Returns:
+            list: configuration classes
+        """
+        classes = [self.CONFIG_CLASS]
+
+        name = meta.get("class")
+
+        if name and name != self.CONFIG_CLASS.__name__:
+            classes.append(get_collector_class_by_config_classname(name).CONFIG_CLASS)
+
+        return classes
 
     def load_credentials(self):
         """read the credentials of the monitoring and probed configurations, once
@@ -689,9 +725,22 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
         else:
             probe_data.status = "KO"
 
-    def exit_gracefully(self, signum, frame):
-        super().exit_gracefully(signum, frame)
+    def run(self, path_list: List[str]) -> None:
+        """run the collector loop, then stop the probe retries: their threads are
+        not daemons, so a run() that ends on an exception, such as the exit on a
+        configuration change, would otherwise leave the process hanging"""
+        try:
+            super().run(path_list)
+        finally:
+            self.stop_ko_manager()
+
+    def stop_ko_manager(self):
+        """stop the probe retries and wait for their threads"""
         self.logger.info("Shutting down KOManager")
         self.ko_manager.stop_retry()
         self.ko_manager.join()
         self.logger.info("KOManager shutdown OK")
+
+    def exit_gracefully(self, signum, frame):
+        super().exit_gracefully(signum, frame)
+        self.stop_ko_manager()

@@ -175,3 +175,22 @@ def test_setup_log_hides_the_broker_password(caplog):
 
     assert "rabbit.example" in caplog.text
     assert "s3cr3t-amqp" not in caplog.text
+
+
+def test_load_config_dict_reads_the_chunk_sizes():
+    instance = Messenger("amqp://localhost:5672")
+
+    instance.load_config_dict(
+        {"amqp": {"new.raw.data.a": {"chunk_size": 12}, "new.raw.data.b": {}}},
+        "odata/a.json",
+    )
+
+    assert instance.chunk_config == {"new.raw.data.a": 12}
+
+
+def test_load_config_dict_ignores_a_content_without_amqp():
+    instance = Messenger("amqp://localhost:5672")
+
+    instance.load_config_dict({"models": []}, "models.json")
+
+    assert instance.chunk_config == {}

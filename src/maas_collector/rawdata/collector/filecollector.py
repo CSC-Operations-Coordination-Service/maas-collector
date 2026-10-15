@@ -30,10 +30,15 @@ from maas_collector.health.serverthread import ServerThread
 from maas_collector.rawdata.backup_report import BackupReportWriter
 from maas_collector.rawdata.model import ActionIterator
 from maas_collector.rawdata import extractor
-from maas_collector.rawdata.configuration import (
-    load_json as load_configuration_json,
-    get_model,
-    find_configurations,
+from maas_collector.rawdata.configuration import load_json_dict, get_model
+from maas_collector.rawdata.configprovider import (
+    ConfigProvider,
+    ConfigSource,
+    ConfigStoreArgs,
+    ConfigValidationError,
+    build_config_provider,
+    describe_config_changes,
+    validate_config_sources,
 )
 
 from maas_collector.rawdata.messenger import Messenger
@@ -43,6 +48,9 @@ from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 from maas_collector.rawdata.collector.credentialprovider import VaultArgs
 
 from maas_collector.rawdata.meta import IngestionMeta
+
+# exit code of a collector that stops to restart on a new configuration: EX_TEMPFAIL
+CONFIG_CHANGED_EXIT_CODE = 75
 
 
 # collector classes need many attributes
@@ -98,6 +106,15 @@ class CollectorArgs:
     healthcheck_timeout: int = None
 
     es_ignore_certs_verification: bool = False
+
+    # where the configuration is read from: file (rawdata_config and
+    # rawdata_config_dir) or opensearch (config_store)
+    config_backend: str = "file"
+
+    # seconds between two checks for a configuration change, 0 never checks
+    config_refresh_period: int = 300
+
+    config_store: ConfigStoreArgs = None
 
 
 @dataclasses.dataclass
@@ -323,39 +340,52 @@ class FileCollector(CredentialMixin):
         self._action_iterator = None
         self.action_iterator_errors = []
 
-        # list of configuration files
-        self.__config_files = None
+        # configuration sources the configurations were built from
+        self.config_sources: list[ConfigSource] = []
 
-    def get_configs(self, path: str):
-        """get configurations of a given class from a json file
+        # fingerprint of config_sources, None when they cannot change
+        self._config_fingerprint = None
+
+        # time.monotonic() of the last configuration check
+        self._config_check_time: float = None
+
+        # fingerprint of the last rejected configuration, not checked again
+        self._rejected_config_fingerprint = None
+
+        # True while the configuration checks fail, to log one traceback per outage
+        self._config_check_failing = False
+
+    @cached_property
+    def config_provider(self) -> ConfigProvider:
+        """where the configuration is read from"""
+        return build_config_provider(self.args)
+
+    def get_configs(self, source: ConfigSource) -> list:
+        """build the configurations of a configuration source, and register its
+        models
 
         Args:
-            path ([str]): path of the configuration file
-            config_class ([type]): config class object
-
-        Raises:
-            ValueError: when no configuration is available
+            source (ConfigSource): content of a configuration file
 
         Returns:
-            [type]: list of configuration objects
+            list: configuration objects, none for a model-only or amqp-only source
         """
-        # load raw data mapping
-        configs = load_configuration_json(path, self.CONFIG_CLASS)
-
-        if not configs:
-            msg = f"No config declared in {path}"
-            self.logger.error(msg)
-            raise ValueError(msg)
-
-        return configs
+        return list(load_json_dict(source.content, self.CONFIG_CLASS, source.name))
 
     def load_config(self):
         """populate configuration for pattern matching and routing configuration"""
         self.configs.clear()
-        for path in self.config_files:
-            self.configs.extend(self.get_configs(path))
 
-            self._messenger.load_config_file(path)
+        sources = self.config_provider.load()
+
+        for source in sources:
+            self.configs.extend(self.get_configs(source))
+
+            self._messenger.load_config_dict(source.content, source.name)
+
+        self.config_sources = sources
+        self._config_fingerprint = self.config_provider.fingerprint(sources)
+        self._config_check_time = time.monotonic()
 
         # resolve model
         for config in self.configs:
@@ -395,37 +425,100 @@ class FileCollector(CredentialMixin):
         # handle optionnal credential source
         self.load_credentials()
 
-    @property
-    def config_files(self) -> list[str]:
-        """lazy create  the list of configuration files
+    def validate_config(self, sources: list) -> None:
+        """check what setup() requires of a new configuration beyond loading it.
+        Overridden by collectors whose setup() needs more.
+
+        Args:
+            sources (list[ConfigSource]): the new configuration
+
+        Raises:
+            ConfigValidationError: when setup() would refuse it
+        """
+
+    def config_classes_for(self, meta: dict) -> list:
+        """configuration classes a collector entry of a new configuration must build
+        with before the collector restarts on it
+
+        Args:
+            meta (dict): collector entry
 
         Returns:
-            list[str]: list of path
+            list: configuration classes
         """
-        if self.__config_files is None:
-            # lazy create the list
-            self.__config_files = []
+        return [self.CONFIG_CLASS]
 
-            # single file
-            if self.args.rawdata_config:
-                self.__config_files.append(self.args.rawdata_config)
+    def check_config_changes(self):
+        """read the configuration again once the refresh period has elapsed, and exit
+        with CONFIG_CHANGED_EXIT_CODE when it changed, for the orchestrator to
+        restart the collector on it.
 
-            # directory
-            if self.args.rawdata_config_dir:
-                self.__config_files.extend(
-                    find_configurations(self.args.rawdata_config_dir)
+        A failing read is logged and the collector keeps its configuration: it is
+        retried at the next period. A new configuration the collector cannot load
+        is logged and ignored until it changes again.
+
+        Raises:
+            SystemExit: with CONFIG_CHANGED_EXIT_CODE when the configuration changed
+        """
+        if (
+            self._config_check_time is None
+            or self._config_fingerprint is None
+            or self.args.config_refresh_period <= 0
+        ):
+            return
+
+        if time.monotonic() - self._config_check_time < self.args.config_refresh_period:
+            return
+
+        self._config_check_time = time.monotonic()
+
+        try:
+            sources = self.config_provider.load()
+
+        # a failing configuration source shall not stop the collect
+        # pylint: disable=W0703
+        except Exception as error:
+            if self._config_check_failing:
+                self.logger.error(
+                    "Cannot check the configuration, keeping the current one: %s",
+                    error,
+                )
+            else:
+                self.logger.exception(
+                    "Cannot check the configuration, keeping the current one"
                 )
 
-        return self.__config_files
+            self._config_check_failing = True
+            return
+
+        if self._config_check_failing:
+            self.logger.info("Configuration checked again")
+            self._config_check_failing = False
+
+        fingerprint = self.config_provider.fingerprint(sources)
+
+        if fingerprint in (self._config_fingerprint, self._rejected_config_fingerprint):
+            return
+
+        try:
+            validate_config_sources(sources, self.config_classes_for)
+            self.validate_config(sources)
+        except ConfigValidationError as error:
+            self.logger.error("configuration change rejected: %s", error)
+            self._rejected_config_fingerprint = fingerprint
+            return
+
+        self.logger.warning(
+            "configuration changed: %s, restarting",
+            describe_config_changes(self.config_sources, sources),
+        )
+
+        raise SystemExit(CONFIG_CHANGED_EXIT_CODE)
 
     def setup(self):
-        """Load rawdata extraction configuration, connect to AMQP and opensearch"""
-        # load json configuration
-        self.load_config()
-
-        # connect to amqp
-        # self._messenger.setup()
-
+        """Connect to opensearch, load rawdata extraction configuration"""
+        # the connection comes first: the opensearch configuration backend reads
+        # through it. Connections are lazy, so the file backend opens nothing.
         self.logger.info(
             "Setup connection to opensearch to with %d max retries / timeout=%s",
             self.args.es_retries,
@@ -439,6 +532,9 @@ class FileCollector(CredentialMixin):
             verify_certs=not self.args.es_ignore_certs_verification,
             ssl_show_warn=not self.args.es_ignore_certs_verification,
         )
+
+        # load json configuration
+        self.load_config()
 
         # connect signal to exit gracefully
         signal.signal(signal.SIGINT, self.exit_gracefully)
@@ -804,6 +900,10 @@ class FileCollector(CredentialMixin):
                 # pick up rotated credentials. Not in on_loop_start so overrides
                 # cannot skip it
                 self.refresh_credentials()
+
+                # restart on a new configuration, between two loops. Not in
+                # on_loop_start so overrides cannot skip it
+                self.check_config_changes()
 
                 # call template method
                 self.on_loop_start()
