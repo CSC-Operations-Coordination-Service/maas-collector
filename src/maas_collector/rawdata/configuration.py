@@ -17,11 +17,13 @@ LOGGER = logging.getLogger(__name__)
 MODEL_DICT = {}
 
 
-def build_model_class(meta: dict) -> MAASRawDocument:
+def build_model_class(meta: dict, register: bool = True) -> MAASRawDocument:
     """opensearch document class factory
 
     Args:
         meta (dict): meta-information from configuration file
+        register (bool, optional): add the class to MODEL_DICT. False only checks
+            that the class builds. Defaults to True.
 
     Returns:
         model.MAASRawDocument: Document class object
@@ -74,7 +76,8 @@ def build_model_class(meta: dict) -> MAASRawDocument:
     # return new document class
     model_class = type(meta["name"], (MAASRawDocument,), class_dict)
 
-    add_model(model_class)
+    if register:
+        add_model(model_class)
 
     return model_class
 
@@ -102,11 +105,14 @@ def build_extractor(meta: dict) -> extractor.base.BaseExtractor:
     return class_obj(**args)
 
 
-def build_collector_configuration(meta: dict, configuration_class):
+def build_collector_configuration(meta: dict, configuration_class, register=True):
     """build CollectorConfiguration instance from json dict
 
     Args:
         meta (dict): configuration meta information
+        configuration_class: configuration dataclass to instanciate
+        register (bool, optional): register an inline model in MODEL_DICT.
+            Defaults to True.
 
     Returns:
         CollectorConfiguration: build configuration instance
@@ -121,7 +127,7 @@ def build_collector_configuration(meta: dict, configuration_class):
         # create opensearchpy model class
         if isinstance(meta["model"], dict):
             args["model_meta"] = meta["model"].copy()
-            args["model"] = build_model_class(meta["model"])
+            args["model"] = build_model_class(meta["model"], register=register)
         else:
             args["model_meta"] = meta["model"]
             LOGGER.debug("Post-poned model resolution: %s", meta["model"])
@@ -157,6 +163,40 @@ def build_collector_configuration(meta: dict, configuration_class):
     return configuration
 
 
+def load_json_dict(
+    json_dict: dict, configuration_class, source: str = "", register: bool = True
+):
+    """load a list of collector configuration from the content of a configuration
+    file, and register its models
+
+    Args:
+        json_dict (dict): configuration content, {collectors?, models?, amqp?}
+        configuration_class: configuration dataclass to instanciate
+        source (str, optional): name of the content, for the logs. Defaults to "".
+        register (bool, optional): register the models in MODEL_DICT. Defaults to
+            True.
+
+    Returns:
+        typing.Iterator[CollectorConfiguration]: configuration instances
+    """
+    if "collectors" in json_dict:
+        for conf_meta in json_dict["collectors"]:
+            try:
+                yield build_collector_configuration(
+                    conf_meta, configuration_class, register=register
+                )
+            except Exception as error:
+                LOGGER.critical(
+                    "Cannot instanciate configuration from %s: %s", source, conf_meta
+                )
+                raise error
+
+    if "models" in json_dict:
+        for model_meta in json_dict["models"]:
+            LOGGER.debug("Registering model %s", model_meta["name"])
+            build_model_class(model_meta, register=register)
+
+
 def load_json(path: str, configuration_class):
     """load a list of collector configuration from a json file
 
@@ -170,18 +210,7 @@ def load_json(path: str, configuration_class):
     with open(path, encoding="UTF-8") as conf_fd:
         json_dict = json.load(conf_fd)
 
-        if "collectors" in json_dict:
-            for conf_meta in json_dict["collectors"]:
-                try:
-                    yield build_collector_configuration(conf_meta, configuration_class)
-                except Exception as error:
-                    LOGGER.critical("Cannot instanciate configuration: %s", conf_meta)
-                    raise error
-
-        if "models" in json_dict:
-            for model_meta in json_dict["models"]:
-                LOGGER.debug("Registering model %s", model_meta["name"])
-                build_model_class(model_meta)
+    yield from load_json_dict(json_dict, configuration_class, path)
 
 
 def get_model(name):

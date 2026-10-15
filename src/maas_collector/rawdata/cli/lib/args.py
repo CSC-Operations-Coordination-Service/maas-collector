@@ -11,6 +11,7 @@ from maas_collector.queues.queues import DEFAULT_PUBLISH_EXCHANGE_NAME
 from maas_model.vault import ConnectionSettings, VaultClient, read_connection
 
 from maas_collector.rawdata.collector.credentialprovider import VaultArgs
+from maas_collector.rawdata.configprovider import DEFAULT_CONFIG_INDEX, ConfigStoreArgs
 from maas_collector.rawdata.replay import ReplayArgs
 
 
@@ -1155,6 +1156,93 @@ def get_vault_args(namespace: Namespace) -> VaultArgs:
     )
 
 
+def config_index_parser() -> ArgumentParser:
+    """configuration index CLI argument parser factory, shared by the collectors
+    and the configuration admin CLI
+
+    Returns:
+        ArgumentParser: configuration index argument parser
+    """
+    parser = ArgumentParser(add_help=False)
+
+    parser.add_argument(
+        "--config-index",
+        dest="config_index",
+        help="OpenSearch index holding the collector configurations"
+        " (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CONFIG_INDEX",
+        required=False,
+        default=DEFAULT_CONFIG_INDEX,
+        type=str,
+    )
+
+    return parser
+
+
+def config_parser() -> ArgumentParser:
+    """collector configuration source CLI argument parser factory
+
+    Returns:
+        ArgumentParser: configuration source argument parser
+    """
+    parser = ArgumentParser(add_help=False, parents=[config_index_parser()])
+
+    parser.add_argument(
+        "--config-backend",
+        dest="config_backend",
+        help="Where the configuration is read from: file (-c, -d) or opensearch"
+        " (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CONFIG_BACKEND",
+        required=False,
+        default="file",
+        type=str,
+        choices=["file", "opensearch"],
+    )
+
+    parser.add_argument(
+        "--config-service",
+        dest="config_service",
+        help="Service tag of the configuration documents to load, required with"
+        " the opensearch backend (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CONFIG_SERVICE",
+        required=False,
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--config-refresh-period",
+        dest="config_refresh_period",
+        help="Seconds between two checks for a configuration change, 0 never"
+        " checks (default: %(default)s)",
+        action=EnvDefault,
+        envvar="CONFIG_REFRESH_PERIOD",
+        required=False,
+        default=300,
+        type=int,
+    )
+
+    return parser
+
+
+def get_config_store_args(namespace: Namespace) -> ConfigStoreArgs:
+    """ConfigStoreArgs factory
+
+    Args:
+        namespace (Namespace): parsed arguments
+
+    Returns:
+        ConfigStoreArgs: configuration index settings
+    """
+    return ConfigStoreArgs(
+        index=namespace.config_index,
+        service=namespace.config_service,
+    )
+
+
 def common_parser() -> ArgumentParser:
     """common cli parser factory
 
@@ -1171,6 +1259,7 @@ def common_parser() -> ArgumentParser:
             backup_parser_sftp(),
             replay_parser(),
             vault_parser(),
+            config_parser(),
         ],
     )
 
@@ -1357,6 +1446,9 @@ def get_collector_args(classobj, namespace, **kwargs):
         credential_backend=namespace.credential_backend,
         credential_refresh_period=namespace.credential_refresh_period,
         vault=get_vault_args(namespace),
+        config_backend=namespace.config_backend,
+        config_refresh_period=namespace.config_refresh_period,
+        config_store=get_config_store_args(namespace),
         amqp_priority=namespace.amqp_priority,
         amqp_exchange=namespace.amqp_exchange,
         **kwargs,

@@ -50,6 +50,19 @@ maas-collector configuration can be stored in a single file, or for a more maint
 
 See [configuration](configuration.md)
 
+The configuration can also come from an OpenSearch index, see
+[configuration in OpenSearch](opensearch_config.md):
+
+| CLI option              | Environment variable  | Description                                                                  |
+| ----------------------- | --------------------- | ---------------------------------------------------------------------------- |
+| --config-backend        | CONFIG_BACKEND        | Where the configuration is read from: `file` or `opensearch` (default: file) |
+| --config-index          | CONFIG_INDEX          | Index holding the configurations (default: maas-collector-config)            |
+| --config-service        | CONFIG_SERVICE        | Service tag of the files to load, required with `opensearch` (default: none) |
+| --config-refresh-period | CONFIG_REFRESH_PERIOD | Seconds between two checks for a change, 0 never checks (default: 300)       |
+
+> With `opensearch`, `-c` and `-d` are ignored, and a collector whose configuration
+> changed exits with code 75 for its orchestrator to restart it.
+
 ### Message bus options
 
 maas-collector notifies database updates with messages sent over an AMQP implementation, RabbitMQ.

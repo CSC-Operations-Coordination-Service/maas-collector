@@ -3,7 +3,11 @@
 maas-collector uses JSON file to store:
 
 - a list of configurations in the root key `collectors`
+- named models shared by several configurations in the root key `models`
 - amqp fine-tuning in the root key `amqp`
+
+The files are read from `-c` / `-d` by default. They can also be stored as versioned
+documents in an OpenSearch index, see [configuration in OpenSearch](opensearch_config.md).
 
 ```json
 {
