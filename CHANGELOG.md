@@ -1,5 +1,58 @@
 # Changelog
 
+## Version 3.12.0
+
+### Collector configuration in OpenSearch
+
+- Collectors can read their configuration files from an OpenSearch index instead of
+  `-c` / `-d`: set `CONFIG_BACKEND=opensearch` (`--config-backend`) and
+  `CONFIG_SERVICE` (`--config-service`), the service whose files to load. The files
+  stay the default (`CONFIG_BACKEND=file`).
+- The index, `maas-collector-config` by default (`CONFIG_INDEX`, `--config-index`),
+  holds one document per version of a file, `<path>@<version>`, with its services,
+  author, date and comment. The current version of each path is flagged `latest`, and
+  a deletion is a tombstone version. The mapping is strict, and the file content is
+  stored without being indexed.
+- A running collector checks its files at the start of a loop, once
+  `CONFIG_REFRESH_PERIOD` seconds (`--config-refresh-period`, default 300) have passed.
+  When they changed and it can load the new ones, it logs
+  `configuration changed: <path> v3→v4, ... restarting` and exits with code 75, for
+  its orchestrator to restart it on the new files. A new set it cannot load is logged
+  as `configuration change rejected: <path>@<version>: <reason>` and ignored until it
+  changes again. When OpenSearch cannot be read, the collector keeps its files and
+  checks again at the next period. `CONFIG_REFRESH_PERIOD=0` turns the checks off.
+- At startup, a collector with `CONFIG_BACKEND=opensearch` stops when
+  `CONFIG_SERVICE` or the OpenSearch connection is not set, when OpenSearch cannot be
+  read, or when the index has no file for its service. The configuration is read
+  through the collector's OpenSearch connection, so `ES_VAULT_PATH` works too.
+- New administration CLI, `python -m maas_collector.rawdata.cli.config`: `init`,
+  `import` of a deploy tree (with `--dry-run`), `export`, `list`, `get`, `history`,
+  `diff`, `put`, `rollback` and `delete`. It checks every version before publishing
+  it, refuses credential files, and refuses a publication based on an outdated
+  version. It reads the OpenSearch connection like the collectors, including
+  `ES_VAULT_PATH`.
+- The interface monitor finds the configurations of the interfaces it probes among
+  the files of its own service.
+- Write access to the index means code execution in the collectors, as
+  configurations hold Python lambdas: give the collectors read-only access. New
+  `docs/opensearch_config.md` covers the documents, the CLI, the move from files, the
+  roles, Dashboards and the restart behaviour.
+
+### Changes
+
+- The check meant to refuse a configuration file without collector entries never
+  ran, as it tested a generator. It is removed, so files holding only `models` or
+  only `amqp` keep loading, from files and from the index alike.
+- `FileCollector.get_configs()` takes a `ConfigSource` instead of a path, and the
+  `config_files` property is replaced by `config_provider` and `config_sources`.
+  `configuration.load_json()` and `Messenger.load_config_file()` are unchanged, and
+  rely on the new `load_json_dict()` and `load_config_dict()`.
+
+### Requirements and upgrade
+
+- No new dependency. A collector that sets none of the new variables runs as before.
+- The deployments move one service at a time: see `docs/opensearch_config.md`.
+
 ## Version 3.11.0
 
 ### Credentials from OpenBao / HashiCorp Vault
