@@ -16,7 +16,7 @@ from multiprocessing.pool import ThreadPool
 
 import requests
 
-from maas_model import datetime_to_zulu, telemetry
+from maas_model import datetime_to_zulu
 from maas_collector.rawdata.telemetry import declare_topology
 
 from maas_collector.rawdata.collector.journal import (
@@ -334,6 +334,8 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
 
     CONFIG_CLASS = InterfaceMonitorCollectorConfiguration
 
+    DECLARES_TOPOLOGY_AT_SETUP = False
+
     def __init__(
         self, args: CollectorArgs, monitor_config: InterfaceMonitorConfiguration
     ):
@@ -366,8 +368,7 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
             if config.interface_name == self.monitor_config.interface_name
         ]
 
-        # the base setup declared every configuration, keep the monitored ones
-        telemetry.topology.clear(source="config")
+        # declared here, not by the base setup, so only the monitored ones appear
         declare_topology(self)
 
         if not self.configs:

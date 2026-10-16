@@ -45,7 +45,7 @@ def declare_topology(collector) -> None:
             )
 
 
-def setup_telemetry(collector) -> bool:
+def setup_telemetry(collector, declare: bool = True) -> bool:
     """configure telemetry, off unless --telemetry or MAAS_TELEMETRY, and declare
     the topology. Returns whether telemetry is enabled."""
     enabled = telemetry.configure(
@@ -55,5 +55,6 @@ def setup_telemetry(collector) -> bool:
         project_version=maas_collector.__version__,
         enabled=True if collector.args.telemetry else None,
     )
-    declare_topology(collector)
+    if declare:
+        declare_topology(collector)
     return enabled

@@ -1461,7 +1461,7 @@ def get_collector_args(classobj, namespace, **kwargs):
         config_store=get_config_store_args(namespace),
         amqp_priority=namespace.amqp_priority,
         amqp_exchange=namespace.amqp_exchange,
-        telemetry=namespace.telemetry,
+        telemetry=getattr(namespace, "telemetry", False),
         **kwargs,
     )
 

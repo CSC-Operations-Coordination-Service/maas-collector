@@ -303,6 +303,10 @@ class FileCollector(CredentialMixin):
 
     LOOP_PRECISION_FACTOR = 10
 
+    # False for a collector that declares its topology itself, once it has
+    # filtered its configurations
+    DECLARES_TOPOLOGY_AT_SETUP: typing.ClassVar[bool] = True
+
     def __init__(self, args: CollectorArgs):
         self.args = args
 
@@ -558,7 +562,7 @@ class FileCollector(CredentialMixin):
         # load json configuration
         self.load_config()
 
-        setup_telemetry(self)
+        setup_telemetry(self, declare=self.DECLARES_TOPOLOGY_AT_SETUP)
 
         # connect signal to exit gracefully
         signal.signal(signal.SIGINT, self.exit_gracefully)
@@ -980,8 +984,10 @@ class FileCollector(CredentialMixin):
             self.stop_healthcheck()
             self.logger.info("Exiting run()")
             self.logger.debug(self.stats)
-            self._flush_message_groups()
-            telemetry.shutdown()
+            try:
+                self._flush_message_groups()
+            finally:
+                telemetry.shutdown()
 
     def create_report(self, path: str, errors):
         """write an ingestion error report

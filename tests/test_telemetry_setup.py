@@ -1,12 +1,16 @@
 """Tests of the telemetry setup of the collectors: flag, configure, topology."""
 
 import json
+import os
+import signal
 import shutil
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from maas_model import telemetry
 
+from maas_collector.queues.queues import DEFAULT_PUBLISH_EXCHANGE_NAME
 from maas_collector.rawdata.cli.lib.args import common_parser, get_collector_args
 from maas_collector.rawdata.collector.filecollector import (
     CollectorArgs,
@@ -22,9 +26,16 @@ from maas_collector.rawdata.telemetry import (
     setup_telemetry,
 )
 
-import os
-
 CONF = os.path.join(os.path.dirname(__file__), "conf")
+
+
+@pytest.fixture(autouse=True)
+def restore_signal_handlers():
+    """setup() installs SIGINT/SIGTERM handlers, put the previous ones back"""
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
 
 
 def model(name):
@@ -84,6 +95,12 @@ def test_flag_parsed():
     assert CollectorArgs().telemetry is False
 
 
+def test_get_collector_args_without_telemetry_attribute():
+    namespace = common_parser().parse_args([])
+    del namespace.telemetry
+    assert get_collector_args(CollectorArgs, namespace).telemetry is False
+
+
 def test_setup_declares_topology(telemetry_capture, tmp_path):
     collector = load(two_configs(tmp_path))
 
@@ -98,7 +115,7 @@ def test_setup_declares_topology(telemetry_capture, tmp_path):
     file_point = telemetry_capture.point(
         "maas.topology.route_info", routing_key="file.raw.one"
     )
-    assert file_point.attributes["exchange"] != "custom-ex"
+    assert file_point.attributes["exchange"] == DEFAULT_PUBLISH_EXCHANGE_NAME
     assert file_point.attributes["node"] == "IF_ONE"
     assert (
         telemetry_capture.point("maas.node_info", node="IF_ONE")
@@ -143,7 +160,7 @@ def test_file_collector_setup_calls_setup_telemetry(_es, tmp_path):
     collector = FileCollector(CollectorArgs(rawdata_config_dir=two_configs(tmp_path)))
     with patch("maas_collector.rawdata.collector.filecollector.setup_telemetry") as st:
         collector.setup()
-    st.assert_called_once_with(collector)
+    st.assert_called_once_with(collector, declare=True)
 
 
 @patch("opensearchpy.connection.connections.Connections.create_connection")
@@ -167,8 +184,10 @@ def test_monitor_setup_declares_only_monitor_configs(
     monitor.setup()
     monitor.exit_gracefully(9, "")
 
+    nodes = {p.attributes["node"] for p in telemetry_capture.points("maas.node_info")}
     routes = {
         p.attributes["node"]
         for p in telemetry_capture.points("maas.topology.route_info")
     }
+    assert nodes == {"OMCS_Monitoring"}
     assert routes == {"OMCS_Monitoring"}
