@@ -43,7 +43,7 @@ from maas_collector.rawdata.configprovider import (
 
 from maas_collector.rawdata.messenger import Messenger
 from maas_collector.rawdata.replay import ReplayArgs
-from maas_collector.rawdata.telemetry import setup_telemetry
+from maas_collector.rawdata.telemetry import collector_file_scope, setup_telemetry
 
 from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 from maas_collector.rawdata.collector.credentialprovider import VaultArgs
@@ -356,6 +356,9 @@ class FileCollector(CredentialMixin):
 
         self._backup = None
 
+        # span context of the last collected file, linked by its file message
+        self._last_collect_span_context = None
+
         # action iterator reference so it can be found to be stopped
         self._action_iterator = None
         self.action_iterator_errors = []
@@ -662,84 +665,92 @@ class FileCollector(CredentialMixin):
             extra_fields=extra_fields,
         )
 
-        self.action_iterator_errors = []
-        try:
-            # feed parallel_bulk with action iterator
-            for success, info in parallel_bulk(
-                es_connections.get_connection(),
-                self._action_iterator,
-                refresh=True,
-                raise_on_exception=False,
-                request_timeout=self.args.es_timeout,
-            ):
-                self._healthcheck.tick()
+        with collector_file_scope(self, config, path) as scope:
+            self.action_iterator_errors = []
+            try:
+                # feed parallel_bulk with action iterator
+                for success, info in parallel_bulk(
+                    es_connections.get_connection(),
+                    self._action_iterator,
+                    refresh=True,
+                    raise_on_exception=False,
+                    request_timeout=self.args.es_timeout,
+                ):
+                    self._healthcheck.tick()
 
-                if not success:
-                    self.logger.error("Error pushing to database: %s", info)
-                    self.on_document_error(path, config, info)
-                    continue
+                    if not success:
+                        self.logger.error("Error pushing to database: %s", info)
+                        self.on_document_error(path, config, info)
+                        scope.count("error")
+                        continue
 
-                document_id = info["index"]["_id"]
+                    document_id = info["index"]["_id"]
 
-                index = info["index"]["_index"]
-                result = info["index"]["result"]
+                    index = info["index"]["_index"]
+                    result = info["index"]["result"]
 
-                if result == "created":
-                    self.logger.info(
-                        "Created %s %s from %s", document_class_name, document_id, path
-                    )
-
-                    self._messenger.handle_message(config, document_id, index)
-                    if iter_callback:
-                        self._action_iterator.execute_callback(
-                            info["index"]["_index"], info["index"]["_id"]
+                    if result == "created":
+                        self.logger.info(
+                            "Created %s %s from %s", document_class_name, document_id, path
                         )
 
-                    self.on_document_insert(path, config, document_id)
+                        self._messenger.handle_message(config, document_id, index)
+                        if iter_callback:
+                            self._action_iterator.execute_callback(
+                                info["index"]["_index"], info["index"]["_id"]
+                            )
 
-                elif result == "updated":
-                    self.logger.info(
-                        "Updated %s %s from %s", document_class_name, document_id, path
-                    )
+                        self.on_document_insert(path, config, document_id)
+                        scope.count("created")
 
-                    self._messenger.handle_message(config, document_id, index)
-
-                    if iter_callback:
-                        self._action_iterator.execute_callback(
-                            info["index"]["_index"], info["index"]["_id"]
+                    elif result == "updated":
+                        self.logger.info(
+                            "Updated %s %s from %s", document_class_name, document_id, path
                         )
 
-                    self.on_document_update(path, config, document_id)
+                        self._messenger.handle_message(config, document_id, index)
 
+                        if iter_callback:
+                            self._action_iterator.execute_callback(
+                                info["index"]["_index"], info["index"]["_id"]
+                            )
+
+                        self.on_document_update(path, config, document_id)
+                        scope.count("updated")
+
+                    else:
+                        self.logger.error("Unexpected result: %s", result)
+            finally:
+                if self.args.force_message and self._action_iterator.unmodified_ids:
+                    # publish the untouched document identifier (hole filling)
+                    self.logger.info(
+                        "Notifiying %d unmodified documents from %s",
+                        len(self._action_iterator.unmodified_ids),
+                        path,
+                    )
+
+                    for document_id in self._action_iterator.unmodified_ids:
+                        self._messenger.handle_message(config, document_id)
+
+                for _ in self._action_iterator.unmodified_ids:
+                    scope.count("unmodified")
+                scope.document_count = self._action_iterator.document_count
+
+                if self._action_iterator.document_count == 0:
+                    self.logger.info("No data published to database from %s", path)
                 else:
-                    self.logger.error("Unexpected result: %s", result)
-        finally:
-            if self.args.force_message and self._action_iterator.unmodified_ids:
-                # publish the untouched document identifier (hole filling)
-                self.logger.info(
-                    "Notifiying %d unmodified documents from %s",
-                    len(self._action_iterator.unmodified_ids),
-                    path,
-                )
+                    self.logger.info(
+                        "%d documents published to database from %s",
+                        self._action_iterator.document_count,
+                        path,
+                    )
 
-                for document_id in self._action_iterator.unmodified_ids:
-                    self._messenger.handle_message(config, document_id)
+                # Should we backup all ?
+                if config.backup:
+                    self.backup_and_report(config, path, report_name, report_folder)
 
-            if self._action_iterator.document_count == 0:
-                self.logger.info("No data published to database from %s", path)
-            else:
-                self.logger.info(
-                    "%d documents published to database from %s",
-                    self._action_iterator.document_count,
-                    path,
-                )
-
-            # Should we backup all ?
-            if config.backup:
-                self.backup_and_report(config, path, report_name, report_folder)
-
-            self.action_iterator_errors = self._action_iterator.action_iterator_errors
-            self._action_iterator = None
+                self.action_iterator_errors = self._action_iterator.action_iterator_errors
+                self._action_iterator = None
 
     def backup_and_report(
         self, config, path: str, report_name: str = "", report_folder: str = ""
@@ -1025,6 +1036,9 @@ class FileCollector(CredentialMixin):
             config (_type_): the collector config
         """
         if config.file_routing_key:
+            options = {}
+            if self._last_collect_span_context is not None:
+                options["links"] = [self._last_collect_span_context]
             self._messenger.send_to_queue(
                 config.file_routing_key,
                 MAASMessage(
@@ -1032,6 +1046,7 @@ class FileCollector(CredentialMixin):
                     document_ids=[os.path.basename(path)],
                     pipeline=[self.__class__.__name__],
                 ),
+                **options,
             )
 
     def on_ingest_error(self, path: str, config, error):
