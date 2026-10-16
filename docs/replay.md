@@ -28,6 +28,9 @@ python -m maas_collector.rawdata.cli.odata -v --replay-interface-name PRIP_S3A_A
 
 This will collect interfaces PRIP_S3A_ACRI and PRIP_S5P_DLR between 2022-08-15T00:00:00Z and 2022-08-15T00:05:00Z.
 
+A replay collects exactly `--replay-start-date`..`--replay-end-date`:
+`odata_start_offset` and `end_date_time_offset` apply to live collection only.
+
 Note using interface replay automatically:
 
 - sets the loop period to 0 (one shot)

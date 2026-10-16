@@ -1,5 +1,13 @@
 # Changelog
 
+## Version 3.13.0
+
+### Replay
+
+- A replay collects exactly `--replay-start-date` to `--replay-end-date`. The
+  `end_date_time_offset` and `odata_start_offset` of the interface configuration
+  now apply to live collection only, they no longer shift the window of a replay.
+
 ## Version 3.12.0
 
 ### Collector configuration in OpenSearch
