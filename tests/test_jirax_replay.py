@@ -156,6 +156,32 @@ def test_failed_jira_replay_is_listed_in_replay_failures(fake_replay_journal):
     fake_replay_journal.assert_called_once()
 
 
+def test_replay_disables_the_watch_loop():
+    collector = make_collector(["A"], ["A"])
+    collector.args.watch_period = 60
+
+    with patch.object(JIRAExtendedCollector, "ingest_tickets"), patch.object(
+        CollectorReplayJournal, "__enter__", lambda self: self
+    ), patch.object(CollectorReplayJournal, "__exit__", lambda *a: False):
+        collector.ingest()
+
+    assert collector.args.watch_period == 0
+
+
+def test_replay_of_an_interface_without_end_point_raises_before_collecting():
+    collector = make_collector(["A", "attachments"], ["A", "attachments"])
+    collector.configs[1].end_point = ""
+    collector.get_configuration_by_interface_name = lambda name: next(
+        (c for c in collector.configs if c.interface_name == name), None
+    )
+
+    with patch.object(JIRAExtendedCollector, "ingest_tickets") as ingest_tickets:
+        with pytest.raises(ValueError, match="attachments has no end_point"):
+            collector.ingest()
+
+    ingest_tickets.assert_not_called()
+
+
 REPLAY_ARGV = [
     "--replay-interface-name",
     "A",

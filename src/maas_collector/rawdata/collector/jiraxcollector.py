@@ -174,9 +174,12 @@ class JIRAExtendedCollector(FileCollector):
         Args:
             replay_args (ReplayArgs): replay options
         """
+        # disable loop: a replay runs once
+        self.args.watch_period = 0
+
         configs = []
 
-        # all interfaces must exist before collecting anything
+        # all interfaces must be replayable before collecting anything
         for interface_name in replay_args.interface_name:
             config = self.get_configuration_by_interface_name(interface_name)
 
@@ -184,6 +187,12 @@ class JIRAExtendedCollector(FileCollector):
                 raise ValueError(
                     f"Interface {interface_name} does not exists. "
                     f"Available interfaces: {self.get_interface_names()}"
+                )
+
+            if not config.end_point:
+                raise ValueError(
+                    f"Interface {interface_name} has no end_point "
+                    "and cannot be replayed"
                 )
 
             configs.append(config)
