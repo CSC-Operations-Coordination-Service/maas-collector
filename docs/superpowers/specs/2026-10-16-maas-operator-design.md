@@ -294,6 +294,17 @@ files are retired as sources, kept only as a `sync` target.
   the merged branch) and maas-collector ≥ the operator merge; pin git refs once
   pushed.
 
+## Carried from part 3 (maas-operator-app) into deployment
+
+- Grafana needs `GF_DATAPROXY_SEND_USER_HEADER=true` and `GF_DATAPROXY_TIMEOUT` ≥ 45
+  (a product check waits up to 30 s); `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=maas-operator-app`
+  unless the zip is signed; install with `GF_PLUGINS_PREINSTALL_SYNC` from the app's nginx image.
+- Verify once on a real Grafana 13.2: the proxy takes the first route matching path + method
+  (a Viewer can POST `api/v1/actions/product-check` and nothing else); the config editor's
+  "Leave without saving?" prompt fires on the side menu, breadcrumbs and Back.
+- The app picks its route family from the Grafana org role (Viewer → `user`, Editor →
+  `operator`, Admin → `admin` in `X-Maas-Roles`).
+
 ## Left to the builder
 
 Index template details for `maas-operation`; check-reply payload shape and
