@@ -1,6 +1,5 @@
 """Message bus tools"""
 
-import contextlib
 import dataclasses
 import json
 import logging
@@ -22,25 +21,19 @@ from maas_collector.queues.queues import (
 )
 
 
-@contextlib.contextmanager
-def _detached():
-    """run with no current span, so a chunk publish is a root span that links
-    to its files instead of hanging under whichever file completed the chunk"""
-    if not telemetry.enabled():
-        yield
-        return
-    # pylint: disable=import-outside-toplevel
-    from opentelemetry import context as otel_context
-
-    token = otel_context.attach(otel_context.Context())
-    try:
-        yield
-    finally:
-        otel_context.detach(token)
-
-
-# most file span contexts linked to one chunked message
+# most file span contexts linked to one aggregated message
 MAX_GROUP_LINKS = 128
+
+
+def _unique_contexts(contexts) -> list:
+    """span contexts without None and duplicates, order kept, capped"""
+    unique = []
+    for context in contexts:
+        if context is not None and context not in unique:
+            unique.append(context)
+            if len(unique) >= MAX_GROUP_LINKS:
+                break
+    return unique
 
 
 def parse_chunk_config(json_dict: dict) -> dict:
@@ -128,9 +121,10 @@ class Messenger:
         # configurations may share a routing key and differ in exchange
         self.message_groups = {}
 
-        # span contexts of the files feeding each group, keyed like the groups
-        # plus the model name: (exchange name, routing key, model name)
-        self._group_links: Dict[Tuple[str, str, str], List] = {}
+        # span context (or None) of the file that produced each buffered
+        # document, aligned with message_groups[...][model]["document_ids"]
+        # and keyed (exchange name, routing key, model name)
+        self._group_contexts: Dict[Tuple[str, str, str], List] = {}
 
         # Exchange instances by name, built on demand
         self._exchanges: Dict[str, Exchange] = {}
@@ -313,16 +307,10 @@ class Messenger:
             info["document_ids"] = []
             info["document_indices"] = []
 
-        links = self._group_links.setdefault(
+        contexts = self._group_contexts.setdefault(
             (exchange_name, config.routing_key, config.model_name), []
         )
-        span_context = telemetry.current_span_context()
-        if (
-            span_context is not None
-            and span_context not in links
-            and len(links) < MAX_GROUP_LINKS
-        ):
-            links.append(span_context)
+        contexts.append(telemetry.current_span_context())
 
         info["document_ids"].append(document_id)
 
@@ -337,27 +325,27 @@ class Messenger:
                 chunk_size,
             )
 
-            # send the chunk
-            with _detached():
-                self.send_to_queue(
-                    config.routing_key,
-                    MAASMessage(
-                        document_class=config.model_name,
-                        document_ids=info["document_ids"][:chunk_size],
-                        document_indices=info["document_indices"][:chunk_size],
-                        pipeline=[self.pipeline_name],
-                    ),
-                    exchange_name=exchange_name,
-                    links=links,
-                )
+            # send the chunk, linked to exactly the files of its documents
+            self.send_to_queue(
+                config.routing_key,
+                MAASMessage(
+                    document_class=config.model_name,
+                    document_ids=info["document_ids"][:chunk_size],
+                    document_indices=info["document_indices"][:chunk_size],
+                    pipeline=[self.pipeline_name],
+                ),
+                exchange_name=exchange_name,
+                links=_unique_contexts(contexts[:chunk_size]),
+                new_trace=True,
+            )
 
             # remove the chunk
             del info["document_ids"][:chunk_size]
             del info["document_indices"][:chunk_size]
+            del contexts[:chunk_size]
 
-        if not info["document_ids"]:
-            # nothing left buffered: the linked files were all sent
-            self._group_links.pop(
+        if not contexts:
+            self._group_contexts.pop(
                 (exchange_name, config.routing_key, config.model_name), None
             )
 
@@ -379,13 +367,16 @@ class Messenger:
                         pipeline=[self.pipeline_name],
                     ),
                     exchange_name=exchange_name,
-                    links=self._group_links.get(
-                        (exchange_name, routing_key, model_name), ()
+                    links=_unique_contexts(
+                        self._group_contexts.get(
+                            (exchange_name, routing_key, model_name), ()
+                        )
                     ),
+                    new_trace=True,
                 )
 
         self.message_groups.clear()
-        self._group_links.clear()
+        self._group_contexts.clear()
 
     def send_to_queue(
         self,
@@ -393,6 +384,7 @@ class Messenger:
         payload: MAASMessage,
         exchange_name: str = "",
         links: Sequence = (),
+        new_trace: bool = False,
     ):
         """send creation / update message to rabbitmq
 
@@ -402,6 +394,8 @@ class Messenger:
             exchange_name (str, optional): destination exchange. Defaults to the
                 messenger one.
             links (Sequence, optional): span contexts linked to the publish span
+            new_trace (bool, optional): start the publish span as a new root
+                trace, for messages aggregating several origins
         """
         # Keep only unique index
         payload.document_indices = list(set(payload.document_indices))
@@ -436,6 +430,7 @@ class Messenger:
                 document_class=payload.document_class,
                 body_size=len(json_body),
                 links=links,
+                new_trace=new_trace,
             ) as headers:
                 producer.publish(
                     json_body,
@@ -490,7 +485,8 @@ class Messenger:
 
         for details
         """
-        no_route = exception.args[1] == "NO_ROUTE"
+        args = getattr(exception, "args", ())
+        no_route = len(args) > 1 and args[1] == "NO_ROUTE"
         telemetry.amqp.returned(
             exchange, routing_key, "NO_ROUTE" if no_route else "other"
         )

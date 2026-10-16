@@ -10,15 +10,7 @@ from maas_model import MAASMessage, telemetry
 
 from maas_collector.rawdata.messenger import Messenger
 
-
-@dataclasses.dataclass
-class FakeConfig:
-    """the attributes Messenger.handle_message and node_name read"""
-
-    routing_key: str
-    model_name: str = "M"
-    exchange_name: str = ""
-    interface_name: str = ""
+from test_messenger import FakeConfig
 
 
 @pytest.fixture
@@ -51,12 +43,21 @@ def test_publish_has_trace_headers_and_span(telemetry_capture, messenger):
 
 
 def test_disabled_publish_body_unchanged(messenger):
-    payload = MAASMessage(document_class="M", document_ids=["a"])
-    messenger.send_to_queue("rk", payload, exchange_name="ex")
+    messenger.send_to_queue(
+        "rk",
+        MAASMessage(
+            message_id="mid", date="2026-01-01T00:00:00.000Z", document_class="M", document_ids=["a"], pipeline=["x"]
+        ),
+        exchange_name="ex",
+    )
     call = messenger._producer.publish.call_args
     assert call.kwargs["headers"] == {}
-    expected = dataclasses.asdict(payload)
-    assert call.args[0] == json.dumps(expected)
+    fresh = MAASMessage(
+        message_id="mid", date="2026-01-01T00:00:00.000Z", document_class="M", document_ids=["a"], pipeline=["x"]
+    )
+    fresh.document_indices = []
+    fresh.pipeline = ["Collector"]
+    assert call.args[0] == json.dumps(dataclasses.asdict(fresh))
     assert "traceparent" not in call.args[0]
 
 
@@ -70,35 +71,59 @@ def test_chunk_links_to_each_file(telemetry_capture, messenger):
             )
     pub = telemetry_capture.span("publish ex")
     assert pub.parent is None and len(pub.links) == 3
-    assert messenger._group_links == {}
+    assert messenger._group_contexts == {}
 
 
-def test_flush_passes_links_and_clears(telemetry_capture, messenger):
-    messenger.chunk_config = {"rk": 10}
-    for f in ("f1", "f2"):
-        with telemetry.span("collect.file"):
-            messenger.handle_message(FakeConfig("rk", exchange_name="ex"), f)
-    assert len(messenger._group_links[("ex", "rk", "M")]) == 2
-    messenger.flush_message_groups()
-    assert len(telemetry_capture.span("publish ex").links) == 2
-    assert messenger._group_links == {}
+def _file(name, messenger, doc, config=None):
+    with telemetry.span("collect.file", attributes={"maas.file.name": name}):
+        messenger.handle_message(config or FakeConfig("rk", "M", "ex"), doc)
+
+
+def _linked_files(telemetry_capture, pub):
+    names = {
+        s.context.span_id: s.attributes["maas.file.name"]
+        for s in [x for x in telemetry_capture.spans() if x.name == "collect.file"]
+    }
+    return {names[link.context.span_id] for link in pub.links}
+
+
+def test_links_exact_per_chunk_and_flush_is_root(telemetry_capture, messenger):
+    messenger.chunk_config = {"rk": 3}
+    for name in ("A", "A", "B", "C", "C"):
+        _file(name, messenger, f"d-{name}")
+    with telemetry.span("outer"):
+        messenger.flush_message_groups()
+    pubs = [x for x in telemetry_capture.spans() if x.name == "publish ex"]
+    assert len(pubs) == 2
+    first, flushed = pubs
+    assert _linked_files(telemetry_capture, first) == {"A", "B"}
+    assert _linked_files(telemetry_capture, flushed) == {"C"}
+    assert first.parent is None and flushed.parent is None
+    assert messenger._group_contexts == {}
     assert messenger.message_groups == {}
 
 
 def test_links_capped_at_128(telemetry_capture, messenger):
-    messenger.chunk_config = {"rk": 1000}
-    for _ in range(130):
-        with telemetry.span("collect.file"):
-            messenger.handle_message(FakeConfig("rk", exchange_name="ex"), "d")
-    assert len(messenger._group_links[("ex", "rk", "M")]) == 128
+    messenger.chunk_config = {"rk": 200}
+    for i in range(130):
+        _file(f"f{i}", messenger, f"d{i}")
+    messenger.flush_message_groups()
+    assert len(telemetry_capture.span("publish ex").links) == 128
 
 
-def test_same_span_context_not_duplicated(telemetry_capture, messenger):
+def test_same_file_linked_once(telemetry_capture, messenger):
     messenger.chunk_config = {"rk": 1000}
     with telemetry.span("collect.file"):
         for i in range(3):
-            messenger.handle_message(FakeConfig("rk", exchange_name="ex"), f"d{i}")
-    assert len(messenger._group_links[("ex", "rk", "M")]) == 1
+            messenger.handle_message(FakeConfig("rk", "M", "ex"), f"d{i}")
+    messenger.flush_message_groups()
+    assert len(telemetry_capture.span("publish ex").links) == 1
+
+
+def test_direct_send_stays_child_of_file(telemetry_capture, messenger):
+    _file("A", messenger, "d")
+    pub = telemetry_capture.span("publish ex")
+    assert pub.parent.span_id == telemetry_capture.span("collect.file").context.span_id
 
 
 def test_routed_counter(telemetry_capture, messenger):
@@ -106,7 +131,10 @@ def test_routed_counter(telemetry_capture, messenger):
     messenger.handle_message(config, "a")
     messenger.handle_message(config, "b")
     point = telemetry_capture.point(
-        "maas.collector.documents.routed", node="iface", routing_key="rk"
+        "maas.collector.documents.routed",
+        node="iface",
+        exchange="ex",
+        routing_key="rk",
     )
     assert point.value == 2
 
@@ -129,4 +157,12 @@ def test_on_return_counts(telemetry_capture, messenger):
     messenger._on_return(Exception(312, "NO_ROUTE"), "ex", "rk", Mock())
     assert (
         telemetry_capture.point("maas.messages.returned", reason="NO_ROUTE").value == 1
+    )
+
+
+def test_on_return_never_raises(telemetry_capture, messenger):
+    messenger._on_return(Exception("x"), "ex", "rk", Mock())
+    messenger._on_return(Exception(), "ex", "rk", Mock())
+    assert (
+        telemetry_capture.point("maas.messages.returned", reason="other").value == 2
     )

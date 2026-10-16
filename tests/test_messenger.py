@@ -13,7 +13,7 @@ from maas_collector.rawdata.messenger import Messenger
 
 @dataclasses.dataclass
 class FakeConfig:
-    """the two attributes Messenger.handle_message reads off a configuration"""
+    """the attributes Messenger.handle_message and node_name read off a configuration"""
 
     routing_key: str
 
