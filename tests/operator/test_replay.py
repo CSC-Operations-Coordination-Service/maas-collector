@@ -3,6 +3,7 @@ import copy
 import datetime
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -148,6 +149,16 @@ def test_child_environment_drops_the_config_backend():
         }
     )
     assert env == {"ES_URL": "http://x", "PATH": "/bin"}
+
+
+def test_child_environment_gives_the_lane_its_own_instance_id():
+    env = child_environment({"MAAS_INSTANCE_ID": "odata.1", "PATH": "/bin"}, "short")
+    assert env["MAAS_INSTANCE_ID"] == "odata.1-replay-short"
+
+
+def test_child_environment_without_instance_id_uses_the_host_name():
+    env = child_environment({"PATH": "/bin"}, "short")
+    assert env["MAAS_INSTANCE_ID"] == f"{socket.gethostname()}-replay-short"
 
 
 def test_long_timeout_scales_with_the_window():
