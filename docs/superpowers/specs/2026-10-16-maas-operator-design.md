@@ -93,7 +93,7 @@ d. **Operator worker** — new CLI `maas_collector.rawdata.cli.operator_worker`
      from `maas-collector-config` (via `ConfigStore` export) into a temp dir,
      runs the matching CLI module as a child process with the file backend
      (as `docs/opensearch_config.md` recommends for replays):
-     `python -m maas_collector.rawdata.cli.<module> -d <tmp> --replay-interface-name … --replay-start-date … --replay-end-date … --replay-suffix <operation_id>`.
+     `python -m maas_collector.rawdata.cli.<module> -d <tmp> --replay-interface-name … --replay-start-date … --replay-end-date … --replay-retry <OPERATOR_REPLAY_RETRY, default 3> --replay-suffix=<operation_id>`.
      Module chosen from the entry's `class` (`ODataCollectorConfiguration`→`odata`,
      `JiraExtendedCollectorConfiguration`→`jirax`; table extensible). Updates
      the operation record PUBLISHED→RUNNING (tail of output in `details`)→DONE/FAILED.
