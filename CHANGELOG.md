@@ -9,6 +9,8 @@
   now apply to live collection only, they no longer shift the window of a replay.
 - A replay exits with status 1 when an interface exhausted its retries, so that a
   caller running it as a child process can tell a failed replay from a successful one.
+- Jira interfaces can be replayed over a window: the `jql_query` of the interface must
+  contain `updated > {date_criteria}`, which a replay turns into the window bounds.
 
 ## Version 3.12.0
 

@@ -36,6 +36,13 @@ Note using interface replay automatically:
 - sets the loop period to 0 (one shot)
 - forces database updates and consequently messages on the bus
 
+## Jira interfaces
+
+A jira interface is replayed with one attempt (no retry). Its `jql_query` must contain
+`updated > {date_criteria}`: a replay substitutes the window, so that the query becomes
+`updated > "<start>" AND updated <= "<end>"` (minute precision, a resumed replay starts
+at the last date of its journal).
+
 ## Exit status
 
 The replay exits with status 0 when every interface was replayed, and with status 1
