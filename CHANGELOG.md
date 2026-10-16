@@ -32,6 +32,13 @@
   is killed at the lane timeout even when it prints nothing, and a disabled, deleted,
   missing or non-replayable interface fails the operation with the reason.
 
+- The operator worker checks a product of an odata v4 interface by name or id: it asks
+  the interface live with the credentials of the interface, runs the extraction of the
+  interface on the answer to get the document maas would store, reads the stored one,
+  and replies both with their differing fields, `reportName` and `ingestionTime` left
+  out. A quote in a name is escaped as `''` in the filter. A missing, disabled, non
+  odata or odata v3 interface, or an error answer of the interface, is an error reply.
+
 ## Version 3.12.0
 
 ### Collector configuration in OpenSearch
