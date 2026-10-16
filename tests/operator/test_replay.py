@@ -121,6 +121,8 @@ def test_child_environment_drops_the_config_backend():
             "CONFIG_SERVICE": "odata",
             "CONFIG_INDEX": "i",
             "REPLAY_FOO": "1",
+            "RAWDATA_CONFIG": "/x.json",
+            "RAWDATA_CONFIG_DIR": "/x",
             "ES_URL": "http://x",
             "PATH": "/bin",
         }
@@ -218,6 +220,7 @@ class FakeRunner:
 
     def run(self, command, env, timeout, progress, progress_interval=30):
         self.commands.append((command, env, timeout))
+        self.copy = command[command.index("-d") + 1].split(os.sep)[-2]
         self.conf_files = sorted(
             name
             for name in os.listdir(command[command.index("-d") + 1])
@@ -258,7 +261,7 @@ def test_handle_records_running_then_done(odata_store, tmp_path):
     replay.handle(req())
     assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
     command, env, timeout = runner.commands[0]
-    assert command[command.index("-d") + 1] == str(tmp_path / "op1" / "odata")
+    assert command[command.index("-d") + 1] == str(tmp_path / runner.copy / "odata")
     assert runner.conf_files == ["a.json"]
     assert timeout == 100
 
@@ -286,7 +289,7 @@ def test_handle_of_a_disabled_interface_records_failed_and_returns(
 def test_handle_removes_its_config_copy(odata_store, tmp_path):
     replay, _ = lane(odata_store, FakeRunner(), tmp_path)
     replay.handle(req())
-    assert not (tmp_path / "op1").exists()
+    assert os.listdir(tmp_path) == []
 
 
 def test_handle_never_raises_and_cleans_up(odata_store, tmp_path):
@@ -294,4 +297,65 @@ def test_handle_never_raises_and_cleans_up(odata_store, tmp_path):
     replay.handle(req())
     assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
     assert "no exec" in recorder.details
-    assert not (tmp_path / "op1").exists()
+    assert os.listdir(tmp_path) == []
+
+
+@pytest.mark.parametrize("bad_id", ["..", ".", "/"])
+def test_handle_keeps_to_its_work_folder_whatever_the_operation_id(
+    odata_store, tmp_path, bad_id
+):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "other-lane").mkdir()
+    (tmp_path / "sibling.txt").write_text("x")
+    replay, recorder = lane(odata_store, FakeRunner(), workdir)
+    replay.handle(req(operation_id=bad_id))
+    assert recorder.calls == [(bad_id, RUNNING), (bad_id, DONE, 0)]
+    assert (tmp_path / "sibling.txt").exists()
+    assert (workdir / "other-lane").is_dir()
+    assert os.listdir(workdir) == ["other-lane"]
+
+
+def test_two_handles_get_distinct_copies(odata_store, tmp_path):
+    runner = FakeRunner()
+    replay, _ = lane(odata_store, runner, tmp_path)
+    replay.handle(req())
+    replay.handle(req())
+    assert runner.commands[0][0] != runner.commands[1][0]
+
+
+def test_undecodable_output_does_not_stall_the_child():
+    script = (
+        "import sys\n"
+        "sys.stdout.buffer.write(b'bad \\xff\\xfe\\n' * 100000)\n"
+        "sys.stdout.buffer.flush()"
+    )
+    code, tail = ChildRunner().run(
+        [sys.executable, "-c", script], os.environ.copy(), 30, lambda _: None
+    )
+    assert code == 0
+    assert "\ufffd" in tail
+
+
+def test_child_is_stopped_when_run_exits_by_exception(tmp_path):
+    runner = ChildRunner()
+    pid_file = tmp_path / "pid"
+    script = (
+        f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(30)"
+    )
+
+    def boom(_):
+        raise RuntimeError("progress failed")
+
+    with pytest.raises(RuntimeError):
+        runner.run(
+            [sys.executable, "-c", script],
+            os.environ.copy(),
+            60,
+            boom,
+            progress_interval=1,
+        )
+    assert runner._child is None
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
