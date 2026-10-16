@@ -18,6 +18,8 @@ maas-collector is the component that ingest data files into MAAS raw database fo
 
 - [Vault credentials](vault)
 
+- [Telemetry](telemetry)
+
 - Collector implementations
 
   - [File Collector](filecollector)

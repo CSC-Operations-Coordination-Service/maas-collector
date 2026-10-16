@@ -146,6 +146,19 @@ Health check is required to inform cluster software of the status of the service
 
 > **HEALTHCHECK_TIMEOUT** shall be chosen wisely : it has been implemented to make Kubernetes automatically restart stuck collectors (a rare case that sometimes happens with network connectivity problems).
 
+### Telemetry options
+
+The collectors can send OpenTelemetry traces and metrics. It is off by default and needs
+the `telemetry` extra (`pip install "maas-collector[telemetry]"`).
+
+| CLI option | Environment variable | Description |
+| --- | --- | --- |
+| --telemetry | MAAS_TELEMETRY | Send traces and metrics, `MAAS_TELEMETRY` being `1`, `true`, `yes` or `on` (default: off) |
+
+The destination and the identity come from `OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_PROTOCOL`, `MAAS_DEPLOYMENT` and `MAAS_INSTANCE_ID`. See
+[telemetry](telemetry.md) for these settings and what is emitted.
+
 ### Backup options
 
 -b BACKUP_ENABLED, --backup BACKUP_ENABLED

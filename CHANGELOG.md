@@ -2,6 +2,26 @@
 
 ## Version 3.13.0
 
+### Telemetry
+
+- The collectors can send OpenTelemetry traces and metrics over OTLP, with
+  `--telemetry` or `MAAS_TELEMETRY=1` and the new `telemetry` extra
+  (`pip install "maas-collector[telemetry]"`). It is off by default, and the collector
+  then behaves, logs and publishes as before. A `collect.file` span covers each
+  extracted file and carries the origin interface as baggage; a `publish <exchange>`
+  span covers each message, its trace context travelling in the AMQP headers, never in
+  the body, so the consuming engine continues the trace. A chunked message starts a new
+  trace linked to the files of its documents. The `maas_collector_files`,
+  `_file_duration`, `_documents`, `_documents_routed` and `_loop_duration` metrics, the
+  published and returned message counters, the OpenSearch time per interface and the
+  flow-map topology (nodes and published routes) are recorded. Set
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4318`,
+  `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, `MAAS_DEPLOYMENT={{.Service.Name}}` and
+  `MAAS_INSTANCE_ID={{.Service.Name}}.{{.Task.Slot}}` on the service. A replay run by
+  the operator worker gets `MAAS_INSTANCE_ID=<worker instance>-replay-<lane>`. See
+  `docs/telemetry.md`.
+- maas-collector now requires maas-model 3.2.0.
+
 ### Replay
 
 - A replay collects exactly `--replay-start-date` to `--replay-end-date`. The
