@@ -1,5 +1,6 @@
 import datetime
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -176,7 +177,6 @@ def test_runner_reports_progress_while_the_child_is_silent():
 
 def test_terminate_stops_the_running_child_and_is_a_noop_otherwise():
     runner = ChildRunner()
-    runner.terminate()
     result = []
     thread = threading.Thread(
         target=lambda: result.append(
@@ -197,6 +197,21 @@ def test_terminate_stops_the_running_child_and_is_a_noop_otherwise():
     assert not thread.is_alive()
     assert result[0][0] != 0
     assert "killed after" not in result[0][1]
+    runner.terminate()
+
+
+def test_terminate_before_run_starts_no_child(monkeypatch):
+    def popen(*_args, **_kwargs):
+        raise AssertionError("a child was started")
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    runner = ChildRunner()
+    runner.terminate()
+
+    code, tail = runner.run([sys.executable, "-c", "pass"], {}, 60, lambda _: None)
+
+    assert (code, tail) == (-15, "stopped before start")
+    # still safe to call
     runner.terminate()
 
 

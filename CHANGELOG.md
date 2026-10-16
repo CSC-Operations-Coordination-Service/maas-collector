@@ -29,34 +29,30 @@
 
 - `python -m maas_collector.rawdata.cli.operator_worker` serves the replay and check
   requests of one collector service (`CONFIG_SERVICE`, required) published by the
-  operator backend on the `maas-operator-exchange` topic exchange: one thread per
-  replay lane, `maas-operator-<service>-replay-short` and `-long`, and one for
-  `maas-operator-<service>-check`, so a check is answered while replays run. A replay
-  request is acknowledged on receipt and never redelivered: one lost to a crash keeps
-  its record RUNNING. A malformed request is logged and skipped, and its record goes
-  FAILED when it has an `operation_id`. A check reply goes to `reply_to` on the
-  default exchange with the `correlation_id` of the request and expires after 60 s;
-  a check without `reply_to` is dropped. SIGTERM and SIGINT stop taking requests and
-  terminate the running collectors. The `OPERATOR_*` settings are described in
-  `docs/operator_worker.md`.
-
-- The operator worker replays an interface over a window in a `short` or `long` lane
-  of its service: it copies the service configuration from the index to a temporary
+  operator backend on the `maas-operator-exchange` topic exchange, one thread per
+  queue: `maas-operator-<service>-replay-short` (windows of 24 h at most) and `-long`,
+  each one replay at a time, and `maas-operator-<service>-check`, answered while
+  replays run. A replay copies the service configuration from the index to a temporary
   folder, runs the odata or jirax collector on it as a child process, and records
-  RUNNING, then DONE or FAILED with the exit code and the last output lines. The child
+  RUNNING, then DONE or FAILED with the exit code and the last output lines; the child
   is killed at the lane timeout even when it prints nothing, and a disabled, deleted,
-  missing or non-replayable interface fails the operation with the reason.
-
-- The operator worker checks a product of an odata v4 interface by name or id: it asks
-  the interface live with the credentials of the interface, runs the extraction of the
-  interface on the answer to get the document maas would store, reads the stored one,
-  and replies both with their differing fields, `reportName` and `ingestionTime` left
-  out. A product the interface no longer has is still looked up in maas by its
-  `id_field`. A quote in a name is escaped as `''` in the filter. The interface and its
-  token request get 20 s at most (`OPERATOR_CHECK_TIMEOUT`), the backend waiting 30 s
-  for the reply. A missing, disabled, non odata or odata v3 interface, an error answer
-  of the interface, a product the extraction refuses or a malformed request is an
-  error reply.
+  missing or non-replayable interface fails the operation with the reason. A replay
+  request is acknowledged on receipt and never redelivered: one lost to a crash keeps
+  its record RUNNING. A malformed request is logged and skipped, its record FAILED
+  when it has an `operation_id`. A check takes a product of an odata v4 interface by
+  name or id, asks the interface live with its credentials, runs the extraction of the
+  interface on the answer to get the document maas would store, and replies it with the
+  stored one and their differing fields, `reportName` and `ingestionTime` left out; a
+  product the interface no longer has is still looked up in maas by its `id_field`, and
+  a quote in a name is escaped as `''` in the filter. The interface and its token
+  request get 20 s at most (`OPERATOR_CHECK_TIMEOUT`), the backend waiting 30 s. A
+  missing, disabled, non odata or odata v3 interface, an error answer of the
+  interface, a product the extraction refuses or a malformed request is an error
+  reply. The reply goes to `reply_to` on the default exchange with the
+  `correlation_id` of the request and expires after 60 s; a check without `reply_to`
+  is dropped. SIGTERM and SIGINT stop taking requests, terminate the running
+  collectors and start no other. The `OPERATOR_*` settings are described in
+  `docs/operator_worker.md`.
 
 ## Version 3.12.0
 

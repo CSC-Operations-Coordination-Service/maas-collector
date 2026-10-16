@@ -8,6 +8,8 @@ import uuid
 import kombu
 import pytest
 
+from fakeopensearch import add_config_document
+
 from maas_collector.rawdata.cli.operator_worker import (
     build_settings,
     build_parser,
@@ -24,8 +26,10 @@ from maas_collector.rawdata.operator.contract import (
     replay_queue_name,
     replay_routing_key,
 )
+from maas_collector.rawdata.configstore import ConfigStore
+from maas_collector.rawdata.operator import replay
 from maas_collector.rawdata.operator.records import FAILED
-from maas_collector.rawdata.operator.replay import ChildRunner
+from maas_collector.rawdata.operator.replay import ChildRunner, ReplayLane
 from maas_collector.rawdata.operator.worker import OperatorSettings, OperatorWorker
 
 START = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
@@ -126,8 +130,8 @@ class FakeChecker:
 class Harness:
     """an OperatorWorker on the memory transport, run in a thread"""
 
-    def __init__(self, lanes=None, checker=None):
-        self.service = "svc" + uuid.uuid4().hex[:8]
+    def __init__(self, lanes=None, checker=None, service=None):
+        self.service = service or "svc" + uuid.uuid4().hex[:8]
         self.lanes = lanes or {lane: FakeLane() for lane in LANES}
         self.checker = checker or FakeChecker()
         self.settings = OperatorSettings(service=self.service, poll_interval=0.01)
@@ -363,6 +367,85 @@ def test_stop_terminates_a_running_child():
     assert time.monotonic() - started < 5
     [(code, _tail)] = lane.results
     assert code != 0
+
+
+class BlockingRecorder(FakeRecorder):
+    """holds the first update until released, like a slow OpenSearch"""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def update(self, operation_id, status, exit_code=None, details=None):
+        if not self.entered.is_set():
+            self.entered.set()
+            self.release.wait(5)
+        return super().update(operation_id, status, exit_code, details)
+
+
+def test_stop_before_the_child_starts_spawns_none(
+    fake_opensearch, tmp_path, monkeypatch
+):
+    popen_calls = []
+    monkeypatch.setattr(
+        replay.subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args)
+    )
+    service = "svc" + uuid.uuid4().hex[:8]
+    add_config_document(
+        fake_opensearch,
+        "a.json",
+        1,
+        [service],
+        {
+            "collectors": [
+                {"class": "ODataCollectorConfiguration", "interface_name": "ITF_A"}
+            ]
+        },
+    )
+    recorder = BlockingRecorder()
+    lane = ReplayLane(
+        service,
+        "short",
+        ConfigStore(fake_opensearch),
+        recorder,
+        ChildRunner(),
+        str(tmp_path),
+        18081,
+        60,
+        60,
+    )
+    harness = Harness(lanes={"short": lane, "long": FakeLane()}, service=service)
+    harness.start()
+    harness.publish(replay_routing_key(service, "short"), REQ_SHORT.to_body())
+    # handle is in its OpenSearch round trips, before runner.run
+    wait_for(recorder.entered.is_set)
+
+    harness.worker.stop()
+    recorder.release.set()
+    harness.thread.join(10)
+
+    assert not harness.thread.is_alive()
+    assert popen_calls == []
+    operation_id, status, exit_code, details = recorder.updates[-1]
+    assert (operation_id, status, exit_code) == ("op-short", FAILED, -15)
+    assert "stopped before start" in details
+
+
+def test_request_fetched_after_stop_records_failed(harness):
+    harness.worker.stop()
+
+    harness.worker.on_replay("short", harness.lanes["short"], REQ_SHORT.to_body())
+
+    assert harness.lanes["short"].handled == []
+    assert harness.lanes["short"].recorder.updates == [
+        (
+            "op-short",
+            FAILED,
+            None,
+            "the operator worker stopped before the replay started",
+        )
+    ]
 
 
 def test_stop_calls_terminate_on_every_lane_runner(harness):
