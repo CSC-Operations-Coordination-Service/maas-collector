@@ -410,6 +410,12 @@ class InterfaceMonitor(FileCollector, CredentialMixin):
                     if config.interface_name == collect_conf_dict["interface_name"]
                 ][0]
 
+                if not config.enabled:
+                    self.logger.info(
+                        "Interface %s is disabled", config.interface_name
+                    )
+                    continue
+
                 if config.no_probe:
                     self.logger.info(
                         "Probing is disabled for interface %s", config.interface_name

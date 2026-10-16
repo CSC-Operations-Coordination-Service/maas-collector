@@ -4,7 +4,8 @@ In-memory stand-in for the opensearch-py client, for the configuration tests.
 It covers what the configuration provider, the configuration store and the admin
 CLI call: indices.exists / create, index (op_type=create answers 409 on an existing
 id), get, update, search with a bool query of term filters, sort and size, and the
-scroll calls of opensearchpy.helpers.scan. An index created with a "dynamic":
+scroll calls of opensearchpy.helpers.scan. Searches also take a list of indices and
+an ids query, for MAASDocument.mget_by_ids. An index created with a "dynamic":
 "strict" mapping refuses unmapped top-level fields, like OpenSearch does.
 """
 
@@ -117,13 +118,16 @@ class FakeOpenSearch:
         """bool / term / terms / match_all queries, sort, size. With scroll, every
         hit comes in the first page, and scroll() ends the iteration"""
         self.check_available()
-        if index not in self.documents:
-            raise NotFoundError(404, "index_not_found_exception", index)
+        indices = index if isinstance(index, list) else [index]
+        for name in indices:
+            if name not in self.documents:
+                raise NotFoundError(404, "index_not_found_exception", name)
         body = body or {}
         hits = [
-            {"_index": index, "_id": doc_id, "_source": copy.deepcopy(source)}
-            for doc_id, source in self.documents[index].items()
-            if matches(source, body.get("query", {"match_all": {}}))
+            {"_index": name, "_id": doc_id, "_source": copy.deepcopy(source)}
+            for name in indices
+            for doc_id, source in self.documents[name].items()
+            if matches(source, body.get("query", {"match_all": {}}), doc_id)
         ]
         hits = sort_hits(hits, body.get("sort", []))
         if scroll is None:
@@ -150,10 +154,13 @@ class FakeOpenSearch:
         return {"succeeded": True}
 
 
-def matches(source: dict, query: dict) -> bool:
+def matches(source: dict, query: dict, doc_id: str = None) -> bool:
     """evaluate the subset of the query DSL the configuration code uses"""
     if "match_all" in query:
         return True
+
+    if "ids" in query:
+        return doc_id in query["ids"]["values"]
 
     if "term" in query:
         ((field, value),) = query["term"].items()
@@ -166,7 +173,9 @@ def matches(source: dict, query: dict) -> bool:
 
     if "terms" in query:
         ((field, values),) = query["terms"].items()
-        return any(matches(source, {"term": {field: value}}) for value in values)
+        return any(
+            matches(source, {"term": {field: value}}, doc_id) for value in values
+        )
 
     if "bool" in query:
         clauses = query["bool"]
@@ -176,8 +185,9 @@ def matches(source: dict, query: dict) -> bool:
             return value if isinstance(value, list) else [value]
 
         return all(
-            matches(source, clause) for clause in as_list("filter") + as_list("must")
-        ) and not any(matches(source, clause) for clause in as_list("must_not"))
+            matches(source, clause, doc_id)
+            for clause in as_list("filter") + as_list("must")
+        ) and not any(matches(source, clause, doc_id) for clause in as_list("must_not"))
 
     raise NotImplementedError(f"FakeOpenSearch does not support the query {query}")
 

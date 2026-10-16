@@ -9,7 +9,10 @@ from maas_collector.rawdata.cli.lib.args import (
     get_collector_args,
 )
 
-from maas_collector.rawdata.collector.filecollector import CollectorArgs
+from maas_collector.rawdata.collector.filecollector import (
+    REPLAY_FAILED_EXIT_CODE,
+    CollectorArgs,
+)
 
 from maas_collector.rawdata.collector.jiraxcollector import JIRAExtendedCollector
 
@@ -31,6 +34,9 @@ def jirax_collector_main(args):
         collector.run(("Jira",))
     except KeyboardInterrupt:
         print("exited by keyboard interruption")
+
+    if collector.replay_failures:
+        sys.exit(REPLAY_FAILED_EXIT_CODE)
 
 
 if __name__ == "__main__":

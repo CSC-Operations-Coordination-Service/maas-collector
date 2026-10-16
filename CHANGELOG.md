@@ -1,5 +1,64 @@
 # Changelog
 
+## Version 3.13.0
+
+### Replay
+
+- A replay collects exactly `--replay-start-date` to `--replay-end-date`. The
+  `end_date_time_offset` and `odata_start_offset` of the interface configuration
+  now apply to live collection only, they no longer shift the window of a replay.
+- A replay exits with status 1 when an interface exhausted its retries, so that a
+  caller running it as a child process can tell a failed replay from a successful one.
+  A replay refused before collecting anything, for a disabled or unknown interface or
+  a jira one without `end_point`, exits with status 1 too, the error being logged.
+- Jira interfaces can be replayed over a window: the `jql_query` of the interface must
+  contain `updated > {date_criteria}`, which a replay turns into the window bounds.
+
+### Collector configuration
+
+- A collector entry accepts `enabled: false` to be disabled without being deleted: the
+  collector does not load it, a replay of it fails with "<name> is disabled", and the
+  interface monitor does not probe it. A non-boolean `enabled` is rejected by the
+  configuration validation.
+
+- `config sync <out-dir> [--service S ...]` brings the configuration index into a
+  folder as `<out-dir>/<service>/<path>`: it rewrites only the files whose content
+  changed and removes only the files it wrote itself (listed in
+  `.maas-config-sync.json` of each service folder) that are no longer current, so
+  other files of the folder, such as credentials, are never touched.
+
+### Operator worker
+
+- `python -m maas_collector.rawdata.cli.operator_worker` serves the replay and check
+  requests of one collector service (`CONFIG_SERVICE`, required) published by the
+  operator backend on the `maas-operator-exchange` topic exchange, one thread per
+  queue: `maas-operator-<service>-replay-short` (windows of 24 h at most) and `-long`,
+  each one replay at a time, and `maas-operator-<service>-check`, answered while
+  replays run. A replay copies the service configuration from the index to a temporary
+  folder, runs the odata or jirax collector on it as a child process, and records
+  RUNNING, then DONE or FAILED with the exit code and the last output lines; the child
+  is killed at the lane timeout even when it prints nothing, and a disabled, deleted,
+  missing or non-replayable interface, or a configuration file the copy skipped, fails
+  the operation with the reason. The child gets `--replay-retry 3`
+  (`OPERATOR_REPLAY_RETRY`), so that a dead interface does not hold its lane for hours
+  with the 1024 retries of the collector. A replay request is acknowledged on receipt
+  and never redelivered: one lost to a crash keeps its record RUNNING. A malformed
+  request is logged and skipped, its record FAILED when it has an `operation_id`. A
+  check takes a product of an odata v4 interface by name or id, asks the interface
+  live with its credentials, runs the extraction of the interface on the answer to get
+  the document maas would store, and replies it with the stored one and their
+  differing fields, `reportName` and `ingestionTime` left out; a product the interface
+  no longer has is still looked up in maas by its `id_field`, and a quote in a name is
+  escaped as `''` in the filter. The interface and its token
+  request get 20 s at most (`OPERATOR_CHECK_TIMEOUT`), the backend waiting 30 s. A
+  missing, disabled, non odata or odata v3 interface, an error answer of the
+  interface, a product the extraction refuses or a malformed request is an error
+  reply. The reply goes to `reply_to` on the default exchange with the
+  `correlation_id` of the request and expires after 60 s; a check without `reply_to`
+  is dropped. SIGTERM and SIGINT stop taking requests, terminate the running
+  collectors and start no other. The `OPERATOR_*` settings are described in
+  `docs/operator_worker.md`.
+
 ## Version 3.12.0
 
 ### Collector configuration in OpenSearch

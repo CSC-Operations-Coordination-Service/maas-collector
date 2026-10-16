@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from requests.exceptions import ConnectionError as RequestConnectionError
 
+from maas_collector.rawdata.cli.odata import odata_collector_main
 from maas_collector.rawdata.collector.ftpcollector import FTPCollector
 from maas_collector.rawdata.collector.httpcollector import HttpCollector
 from maas_collector.rawdata.collector.jiraxcollector import JIRAExtendedCollector
@@ -27,6 +28,9 @@ def make_collector(collector_class, interface_names, **config_attributes):
     collector.should_stop_loop = False
     collector._messenger = Mock()
     collector._healthcheck = Mock()
+    collector.replay_failures = []
+    collector.disabled_interface_names = set()
+    collector.args = Mock(replay=None)
     return collector
 
 
@@ -149,3 +153,78 @@ def test_replay_refreshes_the_credentials_before_each_retry():
         collector.ingest_replay(replay_args)
 
     assert collector.refresh_credentials.call_count == 2
+
+
+def run_replay(collector, ingest_http_effect, retry):
+    """run a one-interface replay of the collector with a scripted ingest_http"""
+    collector.args = Mock()
+    module = "maas_collector.rawdata.collector.httpcollector"
+
+    with patch(f"{module}.CollectorReplayJournal") as journal_class, patch(
+        f"{module}.sleep"
+    ), patch.object(HttpCollector, "ingest_http", side_effect=ingest_http_effect):
+        journal_class.return_value.last_date = None
+
+        collector.ingest_replay(
+            ReplayArgs(
+                ["A"], "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "s", retry
+            )
+        )
+
+
+def test_exhausted_replay_is_listed_in_replay_failures():
+    collector = make_collector(HttpCollector, ["A"])
+
+    run_replay(collector, RequestConnectionError("unreachable"), retry=1)
+
+    assert collector.replay_failures == ["A"]
+
+
+def test_unknown_replay_interface_is_listed_in_replay_failures():
+    """refused before collecting anything: the cli still exits 1"""
+    collector = make_collector(HttpCollector, ["A"])
+    collector.args = Mock()
+
+    with pytest.raises(ValueError, match="nope does not exists"):
+        collector.ingest_replay(
+            ReplayArgs(["nope"], "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
+        )
+
+    assert collector.replay_failures == ["nope"]
+
+
+def test_successful_replay_has_no_failures():
+    collector = make_collector(HttpCollector, ["A"])
+
+    run_replay(collector, None, retry=1)
+
+    assert collector.replay_failures == []
+
+
+REPLAY_ARGV = [
+    "--replay-interface-name",
+    "A",
+    "--replay-start-date",
+    "2026-01-01T00:00:00Z",
+    "--replay-end-date",
+    "2026-01-02T00:00:00Z",
+]
+
+
+def test_odata_cli_exits_1_when_a_replay_failed():
+    with patch("maas_collector.rawdata.cli.odata.ODataCollector") as collector_class:
+        collector = collector_class.return_value
+        collector.replay_failures = []
+        collector.run.side_effect = lambda *_: collector.replay_failures.append("A")
+
+        with pytest.raises(SystemExit) as exit_info:
+            odata_collector_main(REPLAY_ARGV)
+
+    assert exit_info.value.code == 1
+
+
+def test_odata_cli_returns_when_no_replay_failed():
+    with patch("maas_collector.rawdata.cli.odata.ODataCollector") as collector_class:
+        collector_class.return_value.replay_failures = []
+
+        odata_collector_main(REPLAY_ARGV)

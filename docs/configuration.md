@@ -49,6 +49,12 @@ itself `collect-exchange` unless set. Declaring it per configuration is what
 allows one collector process to ventilate its messages over several exchanges.
 See [common options](common_options.md#choosing-the-destination-exchange).
 
+`enabled`
+: Optional boolean, `true` by default. With `false` the entry stays in the
+configuration but the collector does not load it: nothing is collected, a replay of
+the interface fails with "<name> is disabled", and the monitor does not probe it. Any
+other type is rejected when the configuration is validated.
+
 `model`
 : An object describing the OpenSearch document model. See below for details.
 

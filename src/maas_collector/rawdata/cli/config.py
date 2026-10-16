@@ -29,13 +29,12 @@ from maas_collector.rawdata.configprovider import (
     is_config_content,
     validate_config_sources,
 )
+from maas_collector.rawdata.configsync import sync_configs, target_path
 from maas_collector.rawdata.configuration import find_configurations
 from maas_collector.rawdata.configstore import (
     ConfigConflictError,
     ConfigNotFoundError,
     ConfigStore,
-    check_path,
-    check_service,
     config_classes_for,
 )
 
@@ -92,6 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     command.add_argument("out_dir", help="output directory")
     command.add_argument("--service", default="", help="only this service")
+
+    command = commands.add_parser(
+        "sync",
+        help="bring <out>/<service>/<path> up to date with the current versions",
+    )
+    command.add_argument("out_dir", help="folder to bring up to date")
+    command.add_argument(
+        "--service",
+        action="append",
+        default=[],
+        help="only this service, can be repeated",
+    )
 
     command = commands.add_parser("list", help="list the current versions")
     command.add_argument("--service", default="", help="only this service")
@@ -315,17 +326,9 @@ def export_command(store: ConfigStore, namespace) -> int:
             # a document written by hand in the index can carry any path or
             # service: never write outside the output directory
             try:
-                check_path(document["path"])
-                check_service(service)
+                target = target_path(root, service, document["path"])
             except ValueError as error:
                 print(f"skipped: {error}", file=sys.stderr)
-                skipped += 1
-                continue
-
-            target = os.path.join(root, service, *document["path"].split("/"))
-
-            if not os.path.realpath(target).startswith(root + os.sep):
-                print(f"skipped: {target} is outside {root}", file=sys.stderr)
                 skipped += 1
                 continue
 
@@ -339,6 +342,21 @@ def export_command(store: ConfigStore, namespace) -> int:
 
     print(f"exported {count} files to {namespace.out_dir}")
     return 1 if skipped else 0
+
+
+def sync_command(store: ConfigStore, namespace) -> int:
+    """bring a folder up to date with the current versions"""
+    result = sync_configs(store, namespace.out_dir, namespace.service)
+
+    print(
+        f"synced {len(result.written)} written, {len(result.unchanged)} unchanged,"
+        f" {len(result.removed)} removed"
+    )
+
+    for name in result.skipped:
+        print(f"skipped: {name}", file=sys.stderr)
+
+    return 1 if result.skipped else 0
 
 
 def list_command(store: ConfigStore, namespace) -> int:
@@ -521,6 +539,7 @@ COMMANDS = {
     "init": init_command,
     "import": import_command,
     "export": export_command,
+    "sync": sync_command,
     "list": list_command,
     "get": get_command,
     "history": history_command,
