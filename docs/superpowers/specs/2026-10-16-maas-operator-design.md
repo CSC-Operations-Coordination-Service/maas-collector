@@ -134,7 +134,7 @@ f. **A failed replay exits non-zero** (found while planning). Today
 
 ### 2. maas-operator-backend (new repo `/home/aagazzi/work/maas-operator-backend`)
 
-Python 3.11, FastAPI, pydantic v2, opensearch-py, kombu, cerbos — layout copied
+Python 3.11, FastAPI, pydantic v2, opensearch-py, kombu — layout copied
 from `download-manager-backend` (`settings.py`, `auth.py`, `messaging.py`,
 `store.py`, `actions.py`, `scripts/generate.sh`, committed `generated/`).
 Generated parts use **maas-model `fastapigen`** (user decision), which today is
@@ -190,9 +190,11 @@ checkout) until it is released. Requires `maas-model[api,vault]`.
     `maas-collector-config`.
 - Auth (my call, follows `ocs-operator-backend/src/ocs_operator_backend/principal.py`):
   trusts `X-Grafana-User` (401 without) and `X-Maas-Roles` set by the plugin
-  proxy route per Grafana role; Cerbos policies hand-written in `cerbos/policies/`.
-  Per deployment: Viewer → read + product check; Editor → recollect + config
-  edit (admin) ; Admin → credential writes. `AUTHZ_MODE=cerbos|allow-all`.
+  proxy route per Grafana role. **No Cerbos for now** (user decision,
+  2026-10-16): roles are checked against a fixed table in the backend
+  (`user` → read + product check; `operator` → also recollect + config edit;
+  `admin` → also credential writes); Cerbos can replace the table later without
+  changing the API.
 - Messaging: exchange `maas-operator-exchange`, routing keys
   `maas.operator.<service>.replay.short|long` / `.check`, queues per service.
 - The public backend lists only RECOLLECT and PRODUCT_CHECK records from
@@ -234,7 +236,7 @@ Pages (shown according to `GET /capabilities` and the user's role):
 
 Swarm stack `csc-ocs-ansible/stacks/apps/maas-operator/` like `download-manager`:
 nginx serving the plugin zip, `maas-operator-backend` ×2 (admin, public — each
-on its Grafana's network), one `operator_worker` per collector service, Cerbos.
+on its Grafana's network), one `operator_worker` per collector service.
 Each Grafana provisions the app with its own `backendUrl`;
 `GF_DATAPROXY_SEND_USER_HEADER=true`.
 
@@ -282,7 +284,7 @@ CI wiring via `workflow-catalog`; how the services list for workers is derived.
 2. maas-model: merge `develop` into the fastapigen branch, tests green.
 3. maas-collector: 1a, 1b, 1c, 1e (each with tests, CHANGELOG), then 1d.
 4. maas-operator-backend: scaffold, generated `maas-operation`, recollect +
-   product check, then admin config + credentials routers, profiles, Cerbos.
+   product check, then admin config + credentials routers, profiles.
 5. maas-operator-app rebuild, pages in the order above.
 6. csc-ocs-ansible: stack, admin Grafana provisioning, TDH Grafana upgrade +
    network, alert script and docker-jobs reading the index / synced folder.
