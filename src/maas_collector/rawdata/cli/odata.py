@@ -8,7 +8,10 @@ from maas_collector.rawdata.cli.lib.args import (
     get_collector_args,
     odata_parser,
 )
-from maas_collector.rawdata.collector.filecollector import CollectorArgs
+from maas_collector.rawdata.collector.filecollector import (
+    REPLAY_FAILED_EXIT_CODE,
+    CollectorArgs,
+)
 from maas_collector.rawdata.collector.odatacollector import (
     ODataCollector,
     ODataConfiguration,
@@ -40,6 +43,9 @@ def odata_collector_main(args):
         collector.run(("OData",))
     except KeyboardInterrupt:
         print("exited by keyboard interruption")
+
+    if collector.replay_failures:
+        sys.exit(REPLAY_FAILED_EXIT_CODE)
 
 
 if __name__ == "__main__":
