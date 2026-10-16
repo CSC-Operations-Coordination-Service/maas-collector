@@ -59,6 +59,11 @@ def operator_parser() -> argparse.ArgumentParser:
         ),
         ("workdir", str, "folder of the configuration copies and check payloads"),
         ("check-timeout", float, "seconds a check may wait for the interface"),
+        (
+            "replay-retry",
+            int,
+            "retries of a failing replay, 10 s apart, before it fails",
+        ),
     )
 
     for name, kind, text in options:
@@ -98,6 +103,7 @@ def build_settings(namespace: argparse.Namespace) -> OperatorSettings:
         healthcheck_port=namespace.operator_healthcheck_port,
         workdir=namespace.operator_workdir,
         check_timeout=namespace.operator_check_timeout,
+        replay_retry=namespace.operator_replay_retry,
     )
 
 
@@ -148,6 +154,7 @@ def operator_worker_main(argv: list[str]) -> int:
             settings.healthcheck_port + offset,
             settings.short_timeout,
             settings.long_timeout_per_day,
+            settings.replay_retry,
         )
         for offset, lane in enumerate(LANES)
     }

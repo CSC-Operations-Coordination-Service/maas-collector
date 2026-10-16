@@ -173,6 +173,10 @@ class JIRAExtendedCollector(FileCollector):
 
         Args:
             replay_args (ReplayArgs): replay options
+
+        Raises:
+            ValueError: an interface is disabled, unknown or without end_point,
+                before anything is collected; it is listed in ``replay_failures``
         """
         # disable loop: a replay runs once
         self.args.watch_period = 0
@@ -181,22 +185,27 @@ class JIRAExtendedCollector(FileCollector):
 
         # all interfaces must be replayable before collecting anything
         for interface_name in replay_args.interface_name:
-            if interface_name in self.disabled_interface_names:
-                raise ValueError(f"Interface {interface_name} is disabled")
+            try:
+                if interface_name in self.disabled_interface_names:
+                    raise ValueError(f"Interface {interface_name} is disabled")
 
-            config = self.get_configuration_by_interface_name(interface_name)
+                config = self.get_configuration_by_interface_name(interface_name)
 
-            if not config:
-                raise ValueError(
-                    f"Interface {interface_name} does not exists. "
-                    f"Available interfaces: {self.get_interface_names()}"
-                )
+                if not config:
+                    raise ValueError(
+                        f"Interface {interface_name} does not exists. "
+                        f"Available interfaces: {self.get_interface_names()}"
+                    )
 
-            if not config.end_point:
-                raise ValueError(
-                    f"Interface {interface_name} has no end_point "
-                    "and cannot be replayed"
-                )
+                if not config.end_point:
+                    raise ValueError(
+                        f"Interface {interface_name} has no end_point "
+                        "and cannot be replayed"
+                    )
+            except ValueError:
+                # loop_body only logs the error: the cli exits 1 on replay_failures
+                self.replay_failures.append(interface_name)
+                raise
 
             configs.append(config)
 

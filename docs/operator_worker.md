@@ -40,9 +40,16 @@ Its own options:
 | `--operator-healthcheck-port`     | `OPERATOR_HEALTHCHECK_PORT`     | 18081                   | health check port of the short lane collector, +1 for long |
 | `--operator-workdir`              | `OPERATOR_WORKDIR`              | system temp folder      | folder of the configuration copies and check payloads      |
 | `--operator-check-timeout`        | `OPERATOR_CHECK_TIMEOUT`        | 20                      | seconds a check may wait for the interface                 |
+| `--operator-replay-retry`         | `OPERATOR_REPLAY_RETRY`         | 3                       | retries of a failing odata replay, 10 s apart              |
 
 A long replay may run `max(short timeout, days of its window × long timeout per
-day)` seconds.
+day)` seconds. The timeout is the one of the lane, that is of the queue the request
+came from, whatever its `lane` field says.
+
+`OPERATOR_REPLAY_RETRY` is given to the child as `--replay-retry`: an odata interface
+that keeps failing gives up after that many retries, 10 s apart, instead of the 1024
+of the collector, so that a dead interface does not hold its lane for hours. A jira
+replay makes one attempt whatever the setting.
 
 ## Queues
 
@@ -70,17 +77,23 @@ window twice. No AMQP connection is held while a replay runs.
 
 For each request, the lane copies the configuration of the service from the index to
 a temporary folder of the work folder, runs the odata or jirax collector on it as a
-child process in replay mode, with `--replay-suffix <operation_id>`, then removes the
-folder. The child is killed at the lane timeout, even when it prints nothing.
+child process in replay mode, with `--replay-suffix=<operation_id>` and
+`--replay-retry <OPERATOR_REPLAY_RETRY>`, then removes the folder. The child is killed
+at the lane timeout, even when it prints nothing.
 
 The operation record, written by the backend in `maas-operation` before it publishes
 the request, is updated by id; the worker never creates a record:
 
 - `RUNNING` when the replay starts, then every 30 s with the last 20 output lines in
   `details`, so `updated_at` keeps moving while the replay runs;
-- `DONE` with `exit_code` 0, or `FAILED` with the exit code and the last lines;
-- `FAILED` with the reason when the interface is missing, disabled, deleted, of
-  another service or of a class that cannot be replayed.
+- `DONE` with `exit_code` 0, or `FAILED` with the exit code and the last lines. The
+  child exits 1 when an interface exhausted its retries, and also when it refuses
+  the replay, for an interface disabled or missing in its copy, or a jira one
+  without `end_point`;
+- `FAILED` with the reason, and no child run, when the interface is missing,
+  disabled, deleted, of another service or of a class that cannot be replayed, or
+  when the copy skipped configuration files of the service (bad paths in the index),
+  which are named.
 
 A malformed request is acknowledged, logged as an error and skipped. When it carries
 an `operation_id`, its record goes `FAILED` with the reason.
@@ -88,7 +101,10 @@ an `operation_id`, its record goes `FAILED` with the reason.
 **A replay lost to a crash of the worker is not run again**: its record stays
 `RUNNING`, with an `updated_at` that no longer moves. On SIGTERM or SIGINT, the worker
 takes no new request, terminates the running collectors and starts no other, even for
-a request it was preparing: their records go `FAILED`.
+a request it was preparing, whose record goes `FAILED`. A terminated collector gets
+10 s to exit before it is killed, and its record gets its real outcome: `FAILED` with
+its exit code, or `DONE` when it still finishes the replay and exits 0 within those
+10 s.
 
 ## Checks
 

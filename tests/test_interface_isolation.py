@@ -180,6 +180,19 @@ def test_exhausted_replay_is_listed_in_replay_failures():
     assert collector.replay_failures == ["A"]
 
 
+def test_unknown_replay_interface_is_listed_in_replay_failures():
+    """refused before collecting anything: the cli still exits 1"""
+    collector = make_collector(HttpCollector, ["A"])
+    collector.args = Mock()
+
+    with pytest.raises(ValueError, match="nope does not exists"):
+        collector.ingest_replay(
+            ReplayArgs(["nope"], "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
+        )
+
+    assert collector.replay_failures == ["nope"]
+
+
 def test_successful_replay_has_no_failures():
     collector = make_collector(HttpCollector, ["A"])
 

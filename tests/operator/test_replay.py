@@ -1,4 +1,7 @@
+import argparse
+import copy
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -9,7 +12,9 @@ import pytest
 
 from fakeopensearch import add_config_document
 
+from maas_collector.rawdata.cli.lib.args import common_parser, odata_parser
 from maas_collector.rawdata.configstore import ConfigStore
+from maas_collector.rawdata.operator import replay
 from maas_collector.rawdata.operator.contract import ReplayRequest
 from maas_collector.rawdata.operator.records import DONE, FAILED, RUNNING
 from maas_collector.rawdata.operator.replay import (
@@ -23,6 +28,7 @@ from maas_collector.rawdata.operator.replay import (
 )
 
 START = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
+CONF_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "conf")
 
 
 def req(days=1, lane="short", name="ITF_A", operation_id="op1"):
@@ -52,7 +58,7 @@ def add(client, path, collectors, services=("odata",), **kwargs):
 
 
 def test_command_for_an_odata_entry():
-    command = build_command("odata", "/c", req(), 18081)
+    command = build_command("odata", "/c", req(), 18081, 3)
     assert command[:4] == [
         sys.executable,
         "-m",
@@ -70,9 +76,18 @@ def test_command_for_an_odata_entry():
         "2026-10-01T00:00:00Z",
         "--replay-end-date",
         "2026-10-02T00:00:00Z",
-        "--replay-suffix",
-        "op1",
+        "--replay-retry",
+        "3",
+        "--replay-suffix=op1",
     ]
+
+
+def test_command_keeps_an_operation_id_starting_with_a_dash():
+    command = build_command("odata", "/c", req(operation_id="-x"), 18081, 3)
+    parser = argparse.ArgumentParser(parents=[common_parser(), odata_parser()])
+    namespace = parser.parse_args(command[3:])
+    assert namespace.replay_suffix == "-x"
+    assert namespace.replay_retry == 3
 
 
 def test_jira_entry_uses_jirax(store, fake_opensearch):
@@ -84,7 +99,7 @@ def test_jira_entry_uses_jirax(store, fake_opensearch):
     )
     found = find_entry(store, "jira", "JIRA")
     assert found["class"] == "JiraExtendedCollectorConfiguration"
-    assert build_command("jirax", "/c", req(), 1)[2].endswith(".jirax")
+    assert build_command("jirax", "/c", req(), 1, 3)[2].endswith(".jirax")
 
 
 def test_find_entry_returns_the_raw_entry(store, fake_opensearch):
@@ -96,15 +111,19 @@ def test_find_entry_returns_the_raw_entry(store, fake_opensearch):
     "case, message",
     [
         ("missing", "not found"),
-        ("deleted", "is deleted"),
+        ("deleted", "ITF_A is deleted"),
+        ("other_deleted", "not found"),
         ("other_service", "only to sftp"),
         ("disabled", "is disabled"),
         ("s3_class", "cannot be replayed"),
     ],
 )
 def test_find_entry_refuses(store, fake_opensearch, case, message):
-    if case == "deleted":
-        add(fake_opensearch, "a.json", [entry()], deleted=True)
+    if case in ("deleted", "other_deleted"):
+        name = "ITF_A" if case == "deleted" else "OTHER"
+        add(fake_opensearch, "a.json", [entry(name)])
+        # a tombstone, as ConfigStore.delete publishes it: content {}
+        store.delete("a.json", "bob", "gone")
     elif case == "other_service":
         add(fake_opensearch, "a.json", [entry()], ["sftp"])
     elif case == "disabled":
@@ -132,9 +151,9 @@ def test_child_environment_drops_the_config_backend():
 
 
 def test_long_timeout_scales_with_the_window():
-    assert replay_timeout(req(days=10, lane="long"), 6 * 3600, 3 * 3600) == 30 * 3600
-    assert replay_timeout(req(days=1, lane="long"), 6 * 3600, 3 * 3600) == 6 * 3600
-    assert replay_timeout(req(days=1), 6 * 3600, 3 * 3600) == 6 * 3600
+    assert replay_timeout("long", req(days=10), 6 * 3600, 3 * 3600) == 30 * 3600
+    assert replay_timeout("long", req(days=1), 6 * 3600, 3 * 3600) == 6 * 3600
+    assert replay_timeout("short", req(days=10), 6 * 3600, 3 * 3600) == 6 * 3600
 
 
 def test_silent_child_is_killed_at_the_timeout():
@@ -246,19 +265,20 @@ class FakeRunner:
         return self.code, self.tail
 
 
-def lane(store, runner, tmp_path, recorder=None):
+def lane(store, runner, tmp_path, recorder=None, name="short", port=18081):
     recorder = recorder or FakeRecorder()
     return (
         ReplayLane(
             "odata",
-            "short",
+            name,
             store,
             recorder,
             runner,
             str(tmp_path),
-            18081,
+            port,
             100,
             50,
+            3,
         ),
         recorder,
     )
@@ -279,6 +299,36 @@ def test_handle_records_running_then_done(odata_store, tmp_path):
     assert command[command.index("-d") + 1] == str(tmp_path / runner.copy / "odata")
     assert runner.conf_files == ["a.json"]
     assert timeout == 100
+
+
+def test_handle_passes_the_replay_retry_of_the_lane(odata_store, tmp_path):
+    runner = FakeRunner()
+    replay_lane, _ = lane(odata_store, runner, tmp_path)
+    replay_lane.handle(req())
+    command = runner.commands[0][0]
+    assert command[command.index("--replay-retry") + 1] == "3"
+
+
+def test_handle_takes_the_timeout_of_its_own_lane(odata_store, tmp_path):
+    """the lane of the request is the backend's label: the queue decides"""
+    runner = FakeRunner()
+    replay_lane, _ = lane(odata_store, runner, tmp_path, name="long")
+    replay_lane.handle(req(days=10, lane="short"))
+    assert runner.commands[0][2] == 10 * 50
+
+
+def test_handle_records_failed_when_the_sync_skipped_a_file(
+    odata_store, fake_opensearch, tmp_path
+):
+    # written straight into the index: ConfigStore.publish refuses this path
+    add(fake_opensearch, "../evil.json", [entry("OTHER")])
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path)
+    replay_lane.handle(req())
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "odata/../evil.json" in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
 
 
 def test_handle_records_failed_with_exit_code_and_tail(odata_store, tmp_path):
@@ -374,3 +424,52 @@ def test_child_is_stopped_when_run_exits_by_exception(tmp_path):
     assert runner._child is None
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+def odata_entry(**extra):
+    """an odata entry the real collector loads, with its model"""
+    with open(
+        os.path.join(CONF_DIR, "test-maas-collector-odata-basic.json"), encoding="UTF-8"
+    ) as conf_fd:
+        meta = copy.deepcopy(json.load(conf_fd)["collectors"][0])
+    meta["interface_name"] = "ITF_A"
+    meta.update(extra)
+    return meta
+
+
+def test_replay_the_child_refuses_records_failed_with_exit_code_1(
+    store, tmp_path, monkeypatch
+):
+    """The real odata collector runs on a copy where the entry is disabled.
+
+    find_entry refuses a disabled entry before any child runs, so the entry is
+    disabled between find_entry and the copy, as a publish would do in that gap:
+    only the child sees it disabled.
+    """
+    store.publish("a.json", {"collectors": [odata_entry()]}, ["odata"], "bob", "v1")
+    real_sync = replay.sync_configs
+
+    def sync_after_a_publish(*args):
+        store.publish(
+            "a.json",
+            {"collectors": [odata_entry(enabled=False)]},
+            ["odata"],
+            "bob",
+            "disabled",
+        )
+        return real_sync(*args)
+
+    monkeypatch.setattr(replay, "sync_configs", sync_after_a_publish)
+    # never reached: the connection of the child is lazy
+    monkeypatch.setenv("ES_URL", "http://localhost:9200")
+    monkeypatch.setenv(
+        "CREDENTIAL_FILE",
+        os.path.join(CONF_DIR, "test-maas-collector-credentials.json"),
+    )
+    replay_lane, recorder = lane(store, ChildRunner(), tmp_path, port=0)
+
+    replay_lane.handle(req())
+
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED, 1)]
+    assert "an interface failed during the replay" in recorder.details
+    assert "Interface ITF_A is disabled" in recorder.details
