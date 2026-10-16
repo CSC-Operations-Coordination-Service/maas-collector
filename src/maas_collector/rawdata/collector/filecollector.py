@@ -52,6 +52,9 @@ from maas_collector.rawdata.meta import IngestionMeta
 # exit code of a collector that stops to restart on a new configuration: EX_TEMPFAIL
 CONFIG_CHANGED_EXIT_CODE = 75
 
+# exit code of a replay CLI when an interface exhausted its retries
+REPLAY_FAILED_EXIT_CODE = 1
+
 
 # collector classes need many attributes
 # pylint: disable=R0902
@@ -313,6 +316,9 @@ class FileCollector(CredentialMixin):
 
         # path to a local error log containing the latest error report
         self.error_log = None
+
+        # interface names whose replay exhausted its retries
+        self.replay_failures: list[str] = []
 
         self.stats = CollectorStats(entities={})
 

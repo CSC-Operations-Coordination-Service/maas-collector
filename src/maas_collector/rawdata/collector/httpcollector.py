@@ -245,6 +245,7 @@ class HttpCollector(FileCollector, HttpMixin):
                     replay_args.end_date_arg,
                 )
             else:
+                self.replay_failures.append(config.interface_name)
                 self.logger.error(
                     "Failed replay for %s between %s and %s",
                     config.interface_name,

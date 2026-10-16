@@ -36,6 +36,11 @@ Note using interface replay automatically:
 - sets the loop period to 0 (one shot)
 - forces database updates and consequently messages on the bus
 
+## Exit status
+
+The replay exits with status 0 when every interface was replayed, and with status 1
+when at least one interface exhausted its retries (`Failed replay for ...` is logged).
+
 ## Error messages
 
 ### Unknown interface
