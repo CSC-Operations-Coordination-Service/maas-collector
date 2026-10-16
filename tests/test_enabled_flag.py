@@ -9,7 +9,12 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from maas_collector.rawdata.collector.filecollector import CollectorArgs
+from maas_collector.rawdata.cli.jirax import jirax_collector_main
+from maas_collector.rawdata.cli.odata import odata_collector_main
+from maas_collector.rawdata.collector.filecollector import (
+    REPLAY_FAILED_EXIT_CODE,
+    CollectorArgs,
+)
 from maas_collector.rawdata.collector.httpcollector import HttpCollector
 from maas_collector.rawdata.collector.jiraxcollector import JIRAExtendedCollector
 from maas_collector.rawdata.collector.monitorcollector import (
@@ -47,11 +52,21 @@ def entry(name, **extra):
     return meta
 
 
-def write_conf(directory, **entries):
+def jira_entry(name, **extra):
+    """a jira entry with the model of the basic test configuration"""
+    meta = entry(name, **extra)
+    del meta["hours_delta"], meta["product_per_page"]
+    meta["class"] = "JiraExtendedCollectorConfiguration"
+    meta["end_point"] = "http://jira.test"
+    meta["jql_query"] = "updated > {date_criteria}"
+    return meta
+
+
+def write_conf(directory, make_entry=entry, **entries):
     """one file holding the model and an entry per name: {name: extra keys}"""
     content = {
         "models": [basic_entry()["model"]],
-        "collectors": [entry(name, **extra) for name, extra in entries.items()],
+        "collectors": [make_entry(name, **extra) for name, extra in entries.items()],
     }
     with open(os.path.join(directory, "conf.json"), "w", encoding="UTF-8") as out:
         json.dump(content, out)
@@ -63,6 +78,7 @@ def make_odata(tmp_path, **entries):
     collector.logger = logging.getLogger("test")
     collector.configs = []
     collector.disabled_interface_names = set()
+    collector.replay_failures = []
     collector._messenger = Mock()
     collector.args = CollectorArgs(
         rawdata_config_dir=str(tmp_path), credential_file=CREDENTIALS
@@ -106,6 +122,8 @@ def test_http_replay_of_a_disabled_interface_says_it_is_disabled(tmp_path):
     collector.load_config()
     with pytest.raises(ValueError, match="B is disabled"):
         HttpCollector.ingest_replay(collector, ReplayArgs(["B"], *WINDOW))
+    # the cli exits 1 on it
+    assert collector.replay_failures == ["B"]
 
 
 def test_jira_replay_of_a_disabled_interface_says_it_is_disabled():
@@ -120,6 +138,43 @@ def test_jira_replay_of_a_disabled_interface_says_it_is_disabled():
         with pytest.raises(ValueError, match="B is disabled"):
             collector.ingest_replay(ReplayArgs(["A", "B"], *WINDOW))
     ingest.assert_not_called()
+    assert collector.replay_failures == ["B"]
+
+
+@pytest.mark.parametrize(
+    "main, make_entry",
+    [(odata_collector_main, entry), (jirax_collector_main, jira_entry)],
+    ids=["odata", "jirax"],
+)
+def test_cli_replay_of_a_disabled_interface_exits_1(
+    tmp_path, caplog, fake_opensearch, main, make_entry
+):
+    """the real run(): ingest_replay refuses inside loop_body, which logs the error
+
+    fake_opensearch resets the default connection setup() creates, never used here.
+    """
+    write_conf(tmp_path, make_entry, A={}, B={"enabled": False})
+    argv = [
+        "-d",
+        str(tmp_path),
+        "--es-url",
+        "http://localhost:9200",
+        "--credential-file",
+        CREDENTIALS,
+        "--healthcheck-port",
+        "0",
+        "--replay-interface-name",
+        "B",
+        "--replay-start-date",
+        "2026-10-01T00:00:00Z",
+        "--replay-end-date",
+        "2026-10-02T00:00:00Z",
+    ]
+    # setup() would replace the signal handlers of pytest
+    with patch("signal.signal"), pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    assert exit_info.value.code == REPLAY_FAILED_EXIT_CODE == 1
+    assert "Interface B is disabled" in caplog.text
 
 
 def test_monitor_does_not_probe_a_disabled_interface(tmp_path):

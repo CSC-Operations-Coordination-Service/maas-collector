@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import uuid
+from unittest.mock import patch
 
 import kombu
 import pytest
@@ -44,6 +45,7 @@ ENVIRONMENT = (
     "OPERATOR_HEALTHCHECK_PORT",
     "OPERATOR_WORKDIR",
     "OPERATOR_CHECK_TIMEOUT",
+    "OPERATOR_REPLAY_RETRY",
 )
 
 REQ_LONG = ReplayRequest(
@@ -414,6 +416,7 @@ def test_stop_before_the_child_starts_spawns_none(
         18081,
         60,
         60,
+        3,
     )
     harness = Harness(lanes={"short": lane, "long": FakeLane()}, service=service)
     harness.start()
@@ -482,6 +485,7 @@ def test_cli_settings_from_environment(monkeypatch):
     monkeypatch.setenv("OPERATOR_WORKDIR", "/work")
     monkeypatch.setenv("OPERATOR_CHECK_TIMEOUT", "15")
     monkeypatch.setenv("OPERATOR_OPERATION_INDEX", "my-operation")
+    monkeypatch.setenv("OPERATOR_REPLAY_RETRY", "7")
 
     namespace = build_parser().parse_args([])
 
@@ -495,6 +499,7 @@ def test_cli_settings_from_environment(monkeypatch):
         healthcheck_port=19000,
         workdir="/work",
         check_timeout=15.0,
+        replay_retry=7,
     )
 
 
@@ -505,3 +510,33 @@ def test_cli_settings_defaults(monkeypatch):
     namespace = build_parser().parse_args(["--config-service", "odata"])
 
     assert build_settings(namespace) == OperatorSettings(service="odata")
+    assert OperatorSettings(service="odata").replay_retry == 3
+
+
+def test_cli_gives_the_replay_retry_to_both_lanes(monkeypatch, fake_opensearch):
+    for name in ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    module = "maas_collector.rawdata.cli.operator_worker"
+
+    with patch(f"{module}.OperatorWorker") as worker_class, patch(
+        f"{module}.signal.signal"
+    ), patch(f"{module}.es_connections") as connections:
+        connections.get_connection.return_value = fake_opensearch
+        operator_worker_main(
+            [
+                "--config-service",
+                "odata",
+                "--es-url",
+                "http://localhost:9200",
+                "--amqp-url",
+                "memory://",
+                "--operator-replay-retry",
+                "5",
+            ]
+        )
+
+    lanes = worker_class.call_args.args[2]
+    assert {name: lane.replay_retry for name, lane in lanes.items()} == {
+        "short": 5,
+        "long": 5,
+    }

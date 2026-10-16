@@ -62,6 +62,9 @@ class OperatorSettings:
     workdir: str = tempfile.gettempdir()
     # seconds a check may wait for the interface
     check_timeout: float = DEFAULT_TIMEOUT
+    # retries of a failing replay, 10 s apart, before it fails: a dead interface
+    # must not hold its lane for hours
+    replay_retry: int = 3
 
 
 def _operation_id(body) -> str:

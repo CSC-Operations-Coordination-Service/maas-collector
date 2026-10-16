@@ -40,13 +40,22 @@ Note using interface replay automatically:
 
 A jira interface is replayed with one attempt (no retry). Its `jql_query` must contain
 `updated > {date_criteria}`: a replay substitutes the window, so that the query becomes
-`updated > "<start>" AND updated <= "<end>"` (minute precision, a resumed replay starts
-at the last date of its journal).
+`updated > "<start>" AND updated <= "<end>"` (a resumed replay starts at the last date
+of its journal).
+
+- JQL dates have a minute precision: the bounds are truncated to the minute, so
+  `--replay-start-date 2026-10-01T10:00:59Z` becomes `"2026-10-01 10:00"`. Give whole
+  minutes to collect exactly the window.
+- Jira reads a JQL date in the timezone of the account the interface connects with,
+  not in UTC: the window is shifted by the offset of that account. Give the API
+  account the UTC timezone in its Jira profile to collect the window asked.
 
 ## Exit status
 
 The replay exits with status 0 when every interface was replayed, and with status 1
-when at least one interface exhausted its retries (`Failed replay for ...` is logged).
+when at least one interface exhausted its retries (`Failed replay for ...` is logged)
+or when the replay is refused before collecting anything: an interface disabled,
+unknown, or a jira one without `end_point` (the error is logged).
 
 ## Error messages
 

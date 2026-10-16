@@ -52,6 +52,24 @@ class ReplayNotPossible(ValueError):
     """The requested interface cannot be replayed"""
 
 
+def _declares(document: dict, interface_name: str) -> bool:
+    return any(
+        entry.get("interface_name") == interface_name
+        for entry in (document.get("content") or {}).get("collectors", [])
+    )
+
+
+def _was_deleted(
+    store: ConfigStore, tombstones: list[str], interface_name: str
+) -> bool:
+    """a tombstone has no content: its older versions tell what it declared"""
+    return any(
+        not version.get("deleted") and _declares(version, interface_name)
+        for path in tombstones
+        for version in store.history(path)
+    )
+
+
 def find_entry(store: ConfigStore, service: str, interface_name: str) -> dict:
     """Return the raw collector entry of an interface of the service
 
@@ -59,21 +77,23 @@ def find_entry(store: ConfigStore, service: str, interface_name: str) -> dict:
         ReplayNotPossible: absent, deleted, only under another service, disabled
             or of a class that cannot be replayed
     """
-    live, deleted, elsewhere = [], False, []
+    live, elsewhere, tombstones = [], [], []
     for document in store.latest():
+        services = document.get("services", [])
+        if document.get("deleted"):
+            if service in services:
+                tombstones.append(document["path"])
+            continue
         for entry in (document.get("content") or {}).get("collectors", []):
             if entry.get("interface_name") != interface_name:
                 continue
-            if service not in document.get("services", []):
-                if not document.get("deleted"):
-                    elsewhere.extend(document.get("services", []))
-            elif document.get("deleted"):
-                deleted = True
-            else:
+            if service in services:
                 live.append(entry)
+            else:
+                elsewhere.extend(services)
 
     if not live:
-        if deleted:
+        if _was_deleted(store, tombstones, interface_name):
             raise ReplayNotPossible(f"{interface_name} is deleted")
         if elsewhere:
             raise ReplayNotPossible(
@@ -98,7 +118,11 @@ def _format_date(value) -> str:
 
 
 def build_command(
-    module: str, conf_dir: str, request: ReplayRequest, healthcheck_port: int
+    module: str,
+    conf_dir: str,
+    request: ReplayRequest,
+    healthcheck_port: int,
+    replay_retry: int,
 ) -> list[str]:
     """Collector invocation, as an argument list"""
     return [
@@ -116,8 +140,10 @@ def build_command(
         _format_date(request.start_date),
         "--replay-end-date",
         _format_date(request.end_date),
-        "--replay-suffix",
-        request.operation_id,
+        "--replay-retry",
+        str(replay_retry),
+        # one item: argparse would take an id starting with - for an option
+        f"--replay-suffix={request.operation_id}",
     ]
 
 
@@ -131,10 +157,14 @@ def child_environment(environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def replay_timeout(
-    request: ReplayRequest, short_timeout: float, long_timeout_per_day: float
+    lane: str,
+    request: ReplayRequest,
+    short_timeout: float,
+    long_timeout_per_day: float,
 ) -> float:
-    """Seconds a replay may run: fixed for the short lane, scaled by window if long"""
-    if request.lane == "short":
+    """Seconds a replay may run in a lane: fixed for the short lane, scaled by window
+    if long"""
+    if lane == "short":
         return short_timeout
     days = (request.end_date - request.start_date).total_seconds() / SECONDS_PER_DAY
     return max(short_timeout, days * long_timeout_per_day)
@@ -270,6 +300,7 @@ class ReplayLane:
         healthcheck_port: int,
         short_timeout: float,
         long_timeout_per_day: float,
+        replay_retry: int,
     ):
         self.service = service
         self.lane = lane
@@ -280,6 +311,7 @@ class ReplayLane:
         self.healthcheck_port = healthcheck_port
         self.short_timeout = short_timeout
         self.long_timeout_per_day = long_timeout_per_day
+        self.replay_retry = replay_retry
 
     def handle(self, request: ReplayRequest) -> None:
         """Replay the request and record its outcome; never raises"""
@@ -290,17 +322,30 @@ class ReplayLane:
             # never built from the request: operation_id is not a safe file name
             copy = tempfile.mkdtemp(dir=self.workdir, prefix="replay-")
             entry = find_entry(self.store, self.service, request.interface_name)
-            sync_configs(self.store, copy, [self.service])
+            synced = sync_configs(self.store, copy, [self.service])
+            if synced.skipped:
+                # the child would run without them, maybe without the interface
+                self.recorder.update(
+                    request.operation_id,
+                    FAILED,
+                    details="configuration files the copy skipped: "
+                    + ", ".join(synced.skipped),
+                )
+                return
             command = build_command(
                 REPLAY_MODULES[entry["class"]],
                 os.path.join(copy, self.service),
                 request,
                 self.healthcheck_port,
+                self.replay_retry,
             )
             code, tail = self.runner.run(
                 command,
                 child_environment(os.environ),
-                replay_timeout(request, self.short_timeout, self.long_timeout_per_day),
+                # the queue the request came from decides, not its label
+                replay_timeout(
+                    self.lane, request, self.short_timeout, self.long_timeout_per_day
+                ),
                 lambda lines: self.recorder.update(
                     request.operation_id, RUNNING, details=lines
                 ),

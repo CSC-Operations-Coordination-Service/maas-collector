@@ -135,6 +135,8 @@ def test_unknown_replay_interface_raises_before_collecting():
             collector.ingest()
 
     ingest_tickets.assert_not_called()
+    # the cli exits 1 on it
+    assert collector.replay_failures == ["nope"]
 
 
 def test_failed_jira_replay_is_listed_in_replay_failures(fake_replay_journal):
@@ -181,6 +183,7 @@ def test_replay_of_an_interface_without_end_point_raises_before_collecting():
             collector.ingest()
 
     ingest_tickets.assert_not_called()
+    assert collector.replay_failures == ["attachments"]
 
 
 REPLAY_ARGV = [
