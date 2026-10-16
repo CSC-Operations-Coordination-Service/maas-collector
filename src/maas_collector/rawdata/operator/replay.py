@@ -6,6 +6,7 @@ import collections
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -147,13 +148,21 @@ def build_command(
     ]
 
 
-def child_environment(environ: Mapping[str, str]) -> dict[str, str]:
-    """Environment of the child: without what makes it read another configuration"""
-    return {
+def child_environment(environ: Mapping[str, str], lane: str = "") -> dict[str, str]:
+    """Environment of the child: without what makes it read another configuration
+
+    With a lane, the child gets an instance id of its own, so its telemetry does not
+    merge with the collector it was started from.
+    """
+    env = {
         name: value
         for name, value in environ.items()
         if name not in DROPPED_ENVIRONMENT and not name.startswith(DROPPED_PREFIX)
     }
+    if lane:
+        base = environ.get("MAAS_INSTANCE_ID") or socket.gethostname()
+        env["MAAS_INSTANCE_ID"] = f"{base}-replay-{lane}"
+    return env
 
 
 def replay_timeout(
@@ -341,7 +350,7 @@ class ReplayLane:
             )
             code, tail = self.runner.run(
                 command,
-                child_environment(os.environ),
+                child_environment(os.environ, self.lane),
                 # the queue the request came from decides, not its label
                 replay_timeout(
                     self.lane, request, self.short_timeout, self.long_timeout_per_day
