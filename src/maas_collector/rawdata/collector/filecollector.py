@@ -23,6 +23,7 @@ from opensearchpy.helpers import parallel_bulk
 from opensearchpy.connection.connections import connections as es_connections
 
 from maas_model import MAASRawDocument, MAASMessage, telemetry
+from maas_model.telemetry import metrics
 
 from maas_collector.health import health
 from maas_collector.health.serverthread import ServerThread
@@ -944,22 +945,30 @@ class FileCollector(CredentialMixin):
                 # on_loop_start so overrides cannot skip it
                 self.check_config_changes()
 
-                # call template method
-                self.on_loop_start()
+                # measured from on_loop_start to on_loop_end, even on error
+                iteration_start = time.perf_counter()
+                try:
+                    # call template method
+                    self.on_loop_start()
 
-                # do the job
-                self.loop_body(path_list)
+                    # do the job
+                    self.loop_body(path_list)
 
-                self.post_loop()
+                    self.post_loop()
 
-                # flush remaining message chunks
-                self._flush_message_groups()
+                    # flush remaining message chunks
+                    self._flush_message_groups()
 
-                # close message bus connection
-                self._messenger.close()
+                    # close message bus connection
+                    self._messenger.close()
 
-                # call template method
-                self.on_loop_end()
+                    # call template method
+                    self.on_loop_end()
+                finally:
+                    metrics.COLLECTOR_LOOP_DURATION.record(
+                        time.perf_counter() - iteration_start,
+                        {"collector_type": type(self).__name__},
+                    )
 
                 # one-shot run with zero period
                 if self.should_stop_loop or self.args.watch_period == 0:

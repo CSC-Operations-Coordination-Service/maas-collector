@@ -11,6 +11,8 @@ from maas_collector.rawdata.collector.filecollector import (
     CollectorArgs,
     FileCollector,
 )
+from maas_model import telemetry
+
 from maas_collector.rawdata.messenger import Messenger
 
 CONF_DIR = os.path.join(os.path.dirname(__file__), "conf", "backup_report_off")
@@ -178,3 +180,22 @@ def test_bad_sidecar_still_measured(telemetry_capture, collector, sample_file):
     )
     assert telemetry_capture.point("maas.collector.file.duration", node=NODE).count == 1
     assert telemetry_capture.span("collect.file").status.status_code.name == "ERROR"
+
+
+def test_loop_duration_recorded(telemetry_capture, collector):
+    """one iteration records one loop duration, run then shuts telemetry down"""
+    collector.args.watch_period = 0
+    collector.start_healthcheck = Mock()
+    collector.stop_healthcheck = Mock()
+    collector.loop_body = Mock()
+    collector._messenger = Mock()
+
+    collector.run([])
+
+    assert (
+        telemetry_capture.point(
+            "maas.collector.loop.duration", collector_type="FileCollector"
+        ).count
+        == 1
+    )
+    assert not telemetry.enabled()
