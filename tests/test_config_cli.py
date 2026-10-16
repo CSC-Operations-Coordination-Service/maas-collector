@@ -355,3 +355,22 @@ def test_connection_from_the_vault(env, fake_vault, opensearch_class, tmp_path):
     assert opensearch_class.call_args.kwargs["hosts"] == [
         "https://config-admin:s3cr3t%2Fadmin@opensearch.example:9200"
     ]
+
+
+def test_sync_prints_counts(env, store, fake_opensearch, tmp_path, capsys):
+    add_config_document(fake_opensearch, "a.json", 1, ["odata"], {"a": 1})
+    add_config_document(fake_opensearch, "b.json", 1, ["odata"], {"b": 1})
+    out = tmp_path / "synced"
+
+    assert run("sync", out) == 0
+    assert capsys.readouterr().out == "synced 2 written, 0 unchanged, 0 removed\n"
+
+    assert run("sync", out, "--service", "odata", "--service", "sftp") == 0
+    assert capsys.readouterr().out == "synced 0 written, 2 unchanged, 0 removed\n"
+    assert read_json(out / "odata" / "a.json") == {"a": 1}
+
+
+def test_sync_exits_1_when_something_was_skipped(env, fake_opensearch, tmp_path):
+    add_config_document(fake_opensearch, "../x.json", 1, ["odata"], {})
+
+    assert run("sync", tmp_path / "out") == 1
