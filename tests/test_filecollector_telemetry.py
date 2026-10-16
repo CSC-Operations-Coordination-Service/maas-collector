@@ -138,7 +138,7 @@ def test_disabled_extract_unchanged(collector, sample_file):
     with patch(BULK, return_value=RESULTS):
         collector.extract_from_file(sample_file, collector.configs[0])
     assert collector._messenger.handle_message.call_count == 2
-    assert collector._last_collect_span_context is None
+    assert collector._collect_span_contexts == []
 
 
 def test_ingest_success_links_file_span(telemetry_capture, collector, sample_file):
@@ -166,6 +166,75 @@ def test_second_ingest_success_has_no_stale_links(
     calls = collector._messenger.send_to_queue.call_args_list
     assert "links" in calls[0].kwargs
     assert "links" not in calls[1].kwargs
+
+
+def test_ingest_success_links_every_extracted_file(
+    telemetry_capture, collector, sample_file
+):
+    """an S3 archive extracts several files before one on_ingest_success"""
+    config = collector.configs[0]
+    config.file_routing_key = "file.rk"
+    collector._messenger = Mock()
+    with patch(BULK, return_value=RESULTS[:1]):
+        collector.extract_from_file(sample_file, config)
+        collector.extract_from_file(sample_file, config)
+    collector.on_ingest_success(sample_file, config)
+    links = collector._messenger.send_to_queue.call_args.kwargs["links"]
+    files = [s for s in telemetry_capture.spans() if s.name == "collect.file"]
+    assert len(files) == 2
+    assert [link.span_id for link in links] == [s.context.span_id for s in files]
+    assert collector._collect_span_contexts == []
+
+
+def test_ingest_success_without_file_routing_key_clears(
+    telemetry_capture, collector, sample_file
+):
+    config = collector.configs[0]
+    config.file_routing_key = ""
+    collector._messenger = Mock()
+    with patch(BULK, return_value=RESULTS[:1]):
+        collector.extract_from_file(sample_file, config)
+    collector.on_ingest_success(sample_file, config)
+    assert collector._collect_span_contexts == []
+
+
+def test_ingest_error_clears_the_file_links(telemetry_capture, collector, sample_file):
+    config = collector.configs[0]
+    config.file_routing_key = "file.rk"
+    collector._messenger = Mock()
+    with patch(BULK, return_value=RESULTS[:1]):
+        collector.extract_from_file(sample_file, config)
+    collector.on_ingest_error(sample_file, config, RuntimeError("boom"))
+    assert collector._collect_span_contexts == []
+    with patch(BULK, return_value=RESULTS[:1]):
+        collector.extract_from_file(sample_file, config)
+    collector.on_ingest_success(sample_file, config)
+    links = collector._messenger.send_to_queue.call_args.kwargs["links"]
+    last = [s for s in telemetry_capture.spans() if s.name == "collect.file"][-1]
+    assert [link.span_id for link in links] == [last.context.span_id]
+
+
+def test_file_contexts_bounded_without_ingest_callbacks(
+    telemetry_capture, collector, sample_file
+):
+    """collectors that never call on_ingest_success must not grow the list forever"""
+    collector._messenger = Mock()
+    with patch(BULK, return_value=[]):
+        for _ in range(130):
+            collector.extract_from_file(sample_file, collector.configs[0])
+    assert len(collector._collect_span_contexts) == 128
+    last = [s for s in telemetry_capture.spans() if s.name == "collect.file"][-1]
+    assert collector._collect_span_contexts[-1].span_id == last.context.span_id
+
+
+def test_file_message_carries_its_origin(telemetry_capture, collector, sample_file):
+    config = collector.configs[0]
+    config.file_routing_key = "file.rk"
+    with patch(BULK, return_value=[]):
+        collector.extract_from_file(sample_file, config)
+    collector.on_ingest_success(sample_file, config)
+    headers = collector._messenger._producer.publish.call_args.kwargs["headers"]
+    assert f"maas.origin.interface={NODE}" in headers["baggage"]
 
 
 def test_bad_sidecar_still_measured(telemetry_capture, collector, sample_file):

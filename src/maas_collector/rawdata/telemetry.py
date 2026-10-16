@@ -8,12 +8,17 @@ import maas_collector
 from maas_collector.queues.queues import DEFAULT_PUBLISH_EXCHANGE_NAME
 from maas_model import telemetry
 from maas_model.telemetry import metrics
+from maas_model.telemetry import semconv
 from maas_model.telemetry import topology
+
+# most span contexts linked to one message: the files of an aggregated message,
+# or the collected files kept for the file_routing_key message
+MAX_GROUP_LINKS = 128
 
 
 def node_name(config) -> str:
     """name of a configuration in the topology and the metric labels"""
-    return config.interface_name or config.model_name
+    return getattr(config, "interface_name", "") or config.model_name
 
 
 def declare_topology(collector) -> None:
@@ -100,7 +105,7 @@ def collector_file_scope(collector, config, path: str):
             "maas.file.name": os.path.basename(path),
         },
     ) as span, telemetry.activity("collector", node), telemetry.baggage(
-        {"maas.origin.interface": node}
+        {semconv.ATTR_ORIGIN_INTERFACE: node}
     ):
         try:
             yield scope
@@ -124,6 +129,11 @@ def collector_file_scope(collector, config, path: str):
             labels = {"node": node, "document_class": config.model_name}
             metrics.COLLECTOR_FILE_DURATION.record(time.perf_counter() - start, labels)
             metrics.COLLECTOR_FILES.add(1, {**labels, "outcome": outcome})
-            collector._last_collect_span_context = (  # pylint: disable=W0212
-                telemetry.current_span_context()
-            )
+            # every file until on_ingest_success or on_ingest_error, which
+            # clear the list: an archive extracts several files. Collectors
+            # that call neither keep only the most recent ones.
+            contexts = collector._collect_span_contexts  # pylint: disable=W0212
+            context = telemetry.current_span_context()
+            if context is not None:
+                contexts.append(context)
+                del contexts[:-MAX_GROUP_LINKS]

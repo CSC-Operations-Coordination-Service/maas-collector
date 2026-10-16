@@ -12,17 +12,13 @@ from kombu.common import maybe_declare
 from kombu.utils.url import maybe_sanitize_url
 
 from maas_model import MAASMessage, telemetry
-from maas_model.telemetry import metrics
+from maas_model.telemetry import metrics, semconv
 
-from maas_collector.rawdata.telemetry import node_name
+from maas_collector.rawdata.telemetry import MAX_GROUP_LINKS, node_name
 from maas_collector.queues.queues import (
     DEFAULT_PUBLISH_EXCHANGE_NAME,
     build_publish_exchange,
 )
-
-
-# most file span contexts linked to one aggregated message
-MAX_GROUP_LINKS = 128
 
 
 def _unique_contexts(contexts) -> list:
@@ -34,6 +30,22 @@ def _unique_contexts(contexts) -> list:
             if len(unique) >= MAX_GROUP_LINKS:
                 break
     return unique
+
+
+def _origin_baggage(entries):
+    """baggage naming the origin interfaces of the documents of a message
+
+    Args:
+        entries: (span context, origin) of each document of the message
+
+    Returns:
+        the baggage context manager, maas.origin.interface being the sorted
+        unique origins joined by commas
+    """
+    origins = sorted({origin for _, origin in entries if origin})
+    if not origins:
+        return telemetry.baggage()
+    return telemetry.baggage({semconv.ATTR_ORIGIN_INTERFACE: ",".join(origins)})
 
 
 def parse_chunk_config(json_dict: dict) -> dict:
@@ -121,9 +133,10 @@ class Messenger:
         # configurations may share a routing key and differ in exchange
         self.message_groups = {}
 
-        # span context (or None) of the file that produced each buffered
-        # document, aligned with message_groups[...][model]["document_ids"]
-        # and keyed (exchange name, routing key, model name)
+        # (span context or None, origin interface) of the file that produced
+        # each buffered document, aligned with
+        # message_groups[...][model]["document_ids"] and keyed
+        # (exchange name, routing key, model name)
         self._group_contexts: Dict[Tuple[str, str, str], List] = {}
 
         # Exchange instances by name, built on demand
@@ -307,10 +320,10 @@ class Messenger:
             info["document_ids"] = []
             info["document_indices"] = []
 
-        contexts = self._group_contexts.setdefault(
+        entries = self._group_contexts.setdefault(
             (exchange_name, config.routing_key, config.model_name), []
         )
-        contexts.append(telemetry.current_span_context())
+        entries.append((telemetry.current_span_context(), node_name(config)))
 
         info["document_ids"].append(document_id)
 
@@ -325,26 +338,29 @@ class Messenger:
                 chunk_size,
             )
 
-            # send the chunk, linked to exactly the files of its documents
-            self.send_to_queue(
-                config.routing_key,
-                MAASMessage(
-                    document_class=config.model_name,
-                    document_ids=info["document_ids"][:chunk_size],
-                    document_indices=info["document_indices"][:chunk_size],
-                    pipeline=[self.pipeline_name],
-                ),
-                exchange_name=exchange_name,
-                links=_unique_contexts(contexts[:chunk_size]),
-                new_trace=True,
-            )
+            # send the chunk, linked to exactly the files of its documents and
+            # carrying exactly their origins, whatever the current baggage is
+            chunk = entries[:chunk_size]
+            with _origin_baggage(chunk):
+                self.send_to_queue(
+                    config.routing_key,
+                    MAASMessage(
+                        document_class=config.model_name,
+                        document_ids=info["document_ids"][:chunk_size],
+                        document_indices=info["document_indices"][:chunk_size],
+                        pipeline=[self.pipeline_name],
+                    ),
+                    exchange_name=exchange_name,
+                    links=_unique_contexts(context for context, _ in chunk),
+                    new_trace=True,
+                )
 
             # remove the chunk
             del info["document_ids"][:chunk_size]
             del info["document_indices"][:chunk_size]
-            del contexts[:chunk_size]
+            del entries[:chunk_size]
 
-        if not contexts:
+        if not entries:
             self._group_contexts.pop(
                 (exchange_name, config.routing_key, config.model_name), None
             )
@@ -358,22 +374,23 @@ class Messenger:
                 if not info["document_ids"]:
                     continue
 
-                self.send_to_queue(
-                    routing_key,
-                    MAASMessage(
-                        document_class=model_name,
-                        document_ids=info["document_ids"],
-                        document_indices=info["document_indices"],
-                        pipeline=[self.pipeline_name],
-                    ),
-                    exchange_name=exchange_name,
-                    links=_unique_contexts(
-                        self._group_contexts.get(
-                            (exchange_name, routing_key, model_name), ()
-                        )
-                    ),
-                    new_trace=True,
+                entries = self._group_contexts.get(
+                    (exchange_name, routing_key, model_name), ()
                 )
+
+                with _origin_baggage(entries):
+                    self.send_to_queue(
+                        routing_key,
+                        MAASMessage(
+                            document_class=model_name,
+                            document_ids=info["document_ids"],
+                            document_indices=info["document_indices"],
+                            pipeline=[self.pipeline_name],
+                        ),
+                        exchange_name=exchange_name,
+                        links=_unique_contexts(context for context, _ in entries),
+                        new_trace=True,
+                    )
 
         self.message_groups.clear()
         self._group_contexts.clear()
@@ -417,11 +434,8 @@ class Messenger:
         json_body = json.dumps(body)
 
         try:
-            # resolve the producer first: _declare needs its channel
-            producer = self.producer
-
-            self._declare(exchange, producer.channel)
-
+            # the span opens first, so that a broker that cannot be reached, or
+            # an exchange that cannot be declared, counts as a failed publish
             with telemetry.amqp.publish_span(
                 exchange.name,
                 routing_key,
@@ -432,6 +446,11 @@ class Messenger:
                 links=links,
                 new_trace=new_trace,
             ) as headers:
+                # resolve the producer first: _declare needs its channel
+                producer = self.producer
+
+                self._declare(exchange, producer.channel)
+
                 producer.publish(
                     json_body,
                     content_type="application/json",

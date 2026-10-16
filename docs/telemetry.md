@@ -80,10 +80,16 @@ consuming the message continues the same trace.
 - A **chunked** message (an `amqp` `chunk_size` on the routing key), a chunk sent when
   the buffer is full or the remainder flushed at the end of the loop, gathers documents
   of several files. Its `publish` span starts a **new trace**, linked to the
-  `collect.file` span of each of its files (at most 128 links). The origin interface
-  baggage does not travel with it.
-- The `file_routing_key` message of a file is linked to that file's `collect.file`
-  span.
+  `collect.file` span of each of its files (at most 128 links). Its baggage
+  `maas.origin.interface` names the origin interfaces of exactly its documents, sorted
+  and joined by commas (`IF_A,IF_B`), whichever file filled the chunk and even for a
+  remainder flushed outside any file. The engine's `process` span shows it.
+- The `file_routing_key` message of a file is linked to the `collect.file` span of
+  each file extracted for it (all the files of an S3 archive), and carries the origin
+  interface of its configuration.
+- A message that fails to publish, including when the broker cannot be reached or
+  the exchange cannot be declared, counts as `maas_messages_published_total{outcome="error"}`
+  and sets its `publish` span to error.
 
 ### Metrics
 

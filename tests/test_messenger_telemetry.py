@@ -2,13 +2,16 @@
 
 import dataclasses
 import json
-from unittest.mock import MagicMock, Mock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, PropertyMock, patch
+from urllib.parse import unquote
 
 import pytest
 
 from maas_model import MAASMessage, telemetry
 
 from maas_collector.rawdata.messenger import Messenger
+from maas_collector.rawdata.telemetry import node_name
 
 from test_messenger import FakeConfig
 
@@ -165,4 +168,118 @@ def test_on_return_never_raises(telemetry_capture, messenger):
     messenger._on_return(Exception(), "ex", "rk", Mock())
     assert (
         telemetry_capture.point("maas.messages.returned", reason="other").value == 2
+    )
+
+
+
+def _error_count(telemetry_capture):
+    return telemetry_capture.point(
+        "maas.messages.published", exchange="ex", routing_key="rk", outcome="error"
+    ).value
+
+
+def test_publish_counted_when_the_broker_is_down(telemetry_capture):
+    """the producer is built inside the publish span: a refused connection counts"""
+    messenger = Messenger("amqp://localhost:5672", exchange_name="ex")
+    with patch.object(
+        Messenger,
+        "connection",
+        new_callable=PropertyMock,
+        side_effect=ConnectionRefusedError("down"),
+    ):
+        with pytest.raises(ConnectionRefusedError):
+            messenger.send_to_queue(
+                "rk", MAASMessage(document_class="M", document_ids=["a"]), "ex"
+            )
+    assert _error_count(telemetry_capture) == 1
+    assert telemetry_capture.span("publish ex").status.status_code.name == "ERROR"
+
+
+def test_publish_counted_when_the_declare_fails(telemetry_capture, messenger):
+    with patch(
+        "maas_collector.rawdata.messenger.maybe_declare",
+        side_effect=ConnectionRefusedError("down"),
+    ):
+        with pytest.raises(ConnectionRefusedError):
+            messenger.send_to_queue(
+                "rk", MAASMessage(document_class="M", document_ids=["a"]), "other"
+            )
+    assert (
+        telemetry_capture.point(
+            "maas.messages.published",
+            exchange="other",
+            routing_key="rk",
+            outcome="error",
+        ).value
+        == 1
+    )
+    messenger._producer.publish.assert_not_called()
+
+
+def _baggage(headers) -> dict:
+    """the W3C baggage header of published headers, decoded"""
+    items = {}
+    for member in headers.get("baggage", "").split(","):
+        key, _, value = member.split(";")[0].partition("=")
+        if key.strip():
+            items[unquote(key.strip())] = unquote(value.strip())
+    return items
+
+
+def _origin_file(messenger, interface, doc):
+    """a document handled inside a file scope of an interface, as the collector does"""
+    with telemetry.span("collect.file"), telemetry.baggage(
+        {"maas.origin.interface": interface}
+    ):
+        messenger.handle_message(
+            FakeConfig("rk", "M", "ex", interface_name=interface), doc
+        )
+
+
+def test_chunk_carries_every_origin(telemetry_capture, messenger):
+    messenger.chunk_config = {"rk": 2}
+    _origin_file(messenger, "IF_A", "a")
+    _origin_file(messenger, "IF_B", "b")
+    headers = messenger._producer.publish.call_args.kwargs["headers"]
+    assert _baggage(headers)["maas.origin.interface"] == "IF_A,IF_B"
+
+
+def test_chunk_carries_only_its_own_origins(telemetry_capture, messenger):
+    messenger.chunk_config = {"rk": 2}
+    for interface, doc in (("IF_B", "b"), ("IF_B", "b2"), ("IF_A", "a")):
+        _origin_file(messenger, interface, doc)
+    messenger.flush_message_groups()
+    first, flushed = messenger._producer.publish.call_args_list
+    assert _baggage(first.kwargs["headers"])["maas.origin.interface"] == "IF_B"
+    assert _baggage(flushed.kwargs["headers"])["maas.origin.interface"] == "IF_A"
+
+
+def test_flush_outside_any_scope_carries_the_origin(telemetry_capture, messenger):
+    messenger.chunk_config = {"rk": 10}
+    _origin_file(messenger, "IF_B", "b")
+    _origin_file(messenger, "IF_A", "a")
+    _origin_file(messenger, "IF_A", "a2")
+    messenger.flush_message_groups()
+    headers = messenger._producer.publish.call_args.kwargs["headers"]
+    assert _baggage(headers)["maas.origin.interface"] == "IF_A,IF_B"
+    assert telemetry_capture.span("publish ex").parent is None
+
+
+def test_origin_falls_back_on_the_model_name(telemetry_capture, messenger):
+    messenger.chunk_config = {"rk": 10}
+    messenger.handle_message(FakeConfig("rk", "M", "ex"), "a")
+    messenger.flush_message_groups()
+    headers = messenger._producer.publish.call_args.kwargs["headers"]
+    assert _baggage(headers)["maas.origin.interface"] == "M"
+
+
+def test_node_name_without_interface_name(telemetry_capture, messenger):
+    config = SimpleNamespace(routing_key="rk", model_name="M", exchange_name="ex")
+    assert node_name(config) == "M"
+    messenger.handle_message(config, "a")
+    assert (
+        telemetry_capture.point(
+            "maas.collector.documents.routed", node="M", routing_key="rk"
+        ).value
+        == 1
     )

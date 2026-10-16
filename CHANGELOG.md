@@ -11,7 +11,9 @@
   extracted file and carries the origin interface as baggage; a `publish <exchange>`
   span covers each message, its trace context travelling in the AMQP headers, never in
   the body, so the consuming engine continues the trace. A chunked message starts a new
-  trace linked to the files of its documents. The `maas_collector_files`,
+  trace linked to the files of its documents, and its baggage names the origin
+  interfaces of those documents. A message that cannot be published, broker down
+  included, is counted as an error. The `maas_collector_files`,
   `_file_duration`, `_documents`, `_documents_routed` and `_loop_duration` metrics, the
   published and returned message counters, the OpenSearch time per interface and the
   flow-map topology (nodes and published routes) are recorded. Set

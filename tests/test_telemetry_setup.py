@@ -146,10 +146,18 @@ def test_setup_telemetry_disabled_by_default(monkeypatch, tmp_path):
 
 def test_setup_telemetry_enabled_by_flag(monkeypatch, tmp_path):
     monkeypatch.delenv("MAAS_TELEMETRY", raising=False)
+    # a closed port: never push into a developer's local stack on localhost:4318
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
+    # and give up on it quickly when shutdown flushes
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1")
     collector = load(two_configs(tmp_path), telemetry=True)
     try:
         assert setup_telemetry(collector) is True
         assert telemetry.enabled() is True
+        exporters = telemetry._state.STATE.otlp_exporters
+        assert exporters
+        for exporter in exporters:
+            assert exporter._endpoint.startswith("http://127.0.0.1:9/")
     finally:
         telemetry.topology._reset_for_tests()
         telemetry.shutdown()

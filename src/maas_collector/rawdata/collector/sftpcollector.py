@@ -299,6 +299,8 @@ class SFTPCollector(FileCollector):
 
     def on_ingest_error(self, path: str, config, error):
         """Override"""
+        super().on_ingest_error(path, config, error)
+
         rejected_dir = self.get_rejected_dir()
 
         if not rejected_dir in self.__created_dirs:

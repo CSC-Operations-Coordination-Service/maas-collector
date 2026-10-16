@@ -23,7 +23,7 @@ from opensearchpy.helpers import parallel_bulk
 from opensearchpy.connection.connections import connections as es_connections
 
 from maas_model import MAASRawDocument, MAASMessage, telemetry
-from maas_model.telemetry import metrics
+from maas_model.telemetry import metrics, semconv
 
 from maas_collector.health import health
 from maas_collector.health.serverthread import ServerThread
@@ -42,9 +42,13 @@ from maas_collector.rawdata.configprovider import (
     validate_config_sources,
 )
 
-from maas_collector.rawdata.messenger import Messenger
+from maas_collector.rawdata.messenger import Messenger, _unique_contexts
 from maas_collector.rawdata.replay import ReplayArgs
-from maas_collector.rawdata.telemetry import collector_file_scope, setup_telemetry
+from maas_collector.rawdata.telemetry import (
+    collector_file_scope,
+    node_name,
+    setup_telemetry,
+)
 
 from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 from maas_collector.rawdata.collector.credentialprovider import VaultArgs
@@ -357,8 +361,10 @@ class FileCollector(CredentialMixin):
 
         self._backup = None
 
-        # span context of the last collected file, linked by its file message
-        self._last_collect_span_context = None
+        # span contexts of the files collected since the last on_ingest_success
+        # or on_ingest_error, linked by the file message: an archive extracts
+        # several files
+        self._collect_span_contexts = []
 
         # action iterator reference so it can be found to be stopped
         self._action_iterator = None
@@ -1044,23 +1050,28 @@ class FileCollector(CredentialMixin):
             path (str): the file path
             config (_type_): the collector config
         """
+        links = _unique_contexts(self._collect_span_contexts)
+        self._collect_span_contexts.clear()
+
         if config.file_routing_key:
-            options = {}
-            if self._last_collect_span_context is not None:
-                options["links"] = [self._last_collect_span_context]
-                self._last_collect_span_context = None
-            self._messenger.send_to_queue(
-                config.file_routing_key,
-                MAASMessage(
-                    document_class=config.model_name,
-                    document_ids=[os.path.basename(path)],
-                    pipeline=[self.__class__.__name__],
-                ),
-                **options,
-            )
+            options = {"links": links} if links else {}
+            # outside the file scope: the message names its origin itself
+            with telemetry.baggage(
+                {semconv.ATTR_ORIGIN_INTERFACE: node_name(config)}
+            ):
+                self._messenger.send_to_queue(
+                    config.file_routing_key,
+                    MAASMessage(
+                        document_class=config.model_name,
+                        document_ids=[os.path.basename(path)],
+                        pipeline=[self.__class__.__name__],
+                    ),
+                    **options,
+                )
 
     def on_ingest_error(self, path: str, config, error):
-        """Template method"""
+        """Template method: overrides call it, it forgets the collected files"""
+        self._collect_span_contexts.clear()
 
     def on_ingest_finish(self, path: str, errors):
         """Post-ingestion callback for the whole file"""
