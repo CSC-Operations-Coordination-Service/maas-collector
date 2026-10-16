@@ -112,6 +112,7 @@ python -m maas_collector.rawdata.cli.config [--config-index INDEX] [--author NAM
 | `init`                                                                   | Create the index with its mapping. Does nothing if it exists.                                                        |
 | `import <deploy-dir> [--dry-run]`                                        | Publish the files of a deploy tree `<deploy-dir>/<service>/**/*.json` (see [Moving to the index](#moving-to-the-index)). |
 | `export <out-dir> [--service S]`                                         | Write the current versions back as `<out-dir>/<service>/<path>`.                                                     |
+| `sync <out-dir> [--service S ...]`                                       | Bring `<out-dir>/<service>/<path>` up to date: rewrite changed files, remove the files a previous sync wrote that are no longer current (listed in `.maas-config-sync.json`), leave any other file alone. |
 | `list [--service S] [--interface I]`                                     | Path, version, services, author and date of the current versions.                                                    |
 | `get <path> [--version N]`                                               | Content on stdout; version, services and author on stderr.                                                           |
 | `history <path>`                                                         | Every version, with its date, author, flags and comment.                                                             |

@@ -19,6 +19,12 @@
   interface monitor does not probe it. A non-boolean `enabled` is rejected by the
   configuration validation.
 
+- `config sync <out-dir> [--service S ...]` brings the configuration index into a
+  folder as `<out-dir>/<service>/<path>`: it rewrites only the files whose content
+  changed and removes only the files it wrote itself (listed in
+  `.maas-config-sync.json` of each service folder) that are no longer current, so
+  other files of the folder, such as credentials, are never touched.
+
 ## Version 3.12.0
 
 ### Collector configuration in OpenSearch
