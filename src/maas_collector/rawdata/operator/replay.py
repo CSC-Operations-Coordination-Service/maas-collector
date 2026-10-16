@@ -34,6 +34,8 @@ TAIL_LINES = 20
 # seconds a child gets to exit after terminate() before it is killed
 TERMINATE_GRACE = 10
 KILLED_EXIT_CODE = -9
+# exit code of a run refused because the runner was terminated before it started
+STOPPED_EXIT_CODE = -15
 SECONDS_PER_DAY = 86400
 
 DROPPED_ENVIRONMENT = (
@@ -145,10 +147,14 @@ class ChildRunner:
         self._lock = threading.Lock()
         self._child = None
         self._kill_at = None
+        self._closed = False
 
     def terminate(self) -> None:
-        """Terminate the running child, if any; safe to call from another thread"""
+        """Terminate the running child, if any, and start no other one; safe to call
+        from another thread"""
         with self._lock:
+            # sticky: a run about to start would otherwise escape the stop
+            self._closed = True
             if self._child is not None and self._child.poll() is None:
                 self._kill_at = time.monotonic() + TERMINATE_GRACE
                 self._child.terminate()
@@ -176,10 +182,13 @@ class ChildRunner:
         is killed after timeout seconds even when it prints nothing.
 
         Returns:
-            tuple[int, str]: exit code (-9 when killed for the timeout), output tail
+            tuple[int, str]: exit code (-9 when killed for the timeout, -15 without
+                a child once terminate() was called), output tail
         """
         tail = collections.deque(maxlen=TAIL_LINES)
         with self._lock:
+            if self._closed:
+                return STOPPED_EXIT_CODE, "stopped before start"
             self._kill_at = None
             # pylint: disable-next=consider-using-with
             child = subprocess.Popen(

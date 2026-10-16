@@ -142,7 +142,7 @@ class OperatorWorker:
                 thread.join(1)
 
     def stop(self, *_args) -> None:
-        """Stop taking requests and terminate the running children"""
+        """Stop taking requests, terminate the running children and start no other"""
         self.should_stop = True
         for lane in self.lanes.values():
             lane.runner.terminate()
@@ -268,11 +268,18 @@ class OperatorWorker:
         if correlation_id:
             properties["correlation_id"] = correlation_id
 
-        producer.publish(
-            reply.to_body(),
-            exchange="",
-            routing_key=reply_to,
-            serializer="json",
-            expiration=REPLY_EXPIRATION,
-            **properties,
-        )
+        try:
+            producer.publish(
+                reply.to_body(),
+                exchange="",
+                routing_key=reply_to,
+                serializer="json",
+                expiration=REPLY_EXPIRATION,
+                **properties,
+            )
+        except Exception:  # pylint: disable=broad-except
+            LOGGER.warning(
+                "Cannot publish the check reply %s to %s", correlation_id, reply_to
+            )
+            # the connection is likely gone: run_checks reconnects
+            raise

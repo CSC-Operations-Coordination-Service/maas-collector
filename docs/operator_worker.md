@@ -87,8 +87,8 @@ an `operation_id`, its record goes `FAILED` with the reason.
 
 **A replay lost to a crash of the worker is not run again**: its record stays
 `RUNNING`, with an `updated_at` that no longer moves. On SIGTERM or SIGINT, the worker
-takes no new request and terminates the running collectors: their records go
-`FAILED`.
+takes no new request, terminates the running collectors and starts no other, even for
+a request it was preparing: their records go `FAILED`.
 
 ## Checks
 
