@@ -36,8 +36,11 @@
   the interface live with the credentials of the interface, runs the extraction of the
   interface on the answer to get the document maas would store, reads the stored one,
   and replies both with their differing fields, `reportName` and `ingestionTime` left
-  out. A quote in a name is escaped as `''` in the filter. A missing, disabled, non
-  odata or odata v3 interface, or an error answer of the interface, is an error reply.
+  out. A product the interface no longer has is still looked up in maas by its
+  `id_field`. A quote in a name is escaped as `''` in the filter. The interface and its
+  token request get 20 s at most. A missing, disabled, non odata or odata v3
+  interface, an error answer of the interface, or a product the extraction refuses is
+  an error reply.
 
 ## Version 3.12.0
 
