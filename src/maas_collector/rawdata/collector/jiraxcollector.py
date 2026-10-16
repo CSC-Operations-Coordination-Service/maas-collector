@@ -181,6 +181,9 @@ class JIRAExtendedCollector(FileCollector):
 
         # all interfaces must be replayable before collecting anything
         for interface_name in replay_args.interface_name:
+            if interface_name in self.disabled_interface_names:
+                raise ValueError(f"Interface {interface_name} is disabled")
+
             config = self.get_configuration_by_interface_name(interface_name)
 
             if not config:

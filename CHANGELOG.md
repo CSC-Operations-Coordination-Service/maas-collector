@@ -12,6 +12,13 @@
 - Jira interfaces can be replayed over a window: the `jql_query` of the interface must
   contain `updated > {date_criteria}`, which a replay turns into the window bounds.
 
+### Collector configuration
+
+- A collector entry accepts `enabled: false` to be disabled without being deleted: the
+  collector does not load it, a replay of it fails with "<name> is disabled", and the
+  interface monitor does not probe it. A non-boolean `enabled` is rejected by the
+  configuration validation.
+
 ## Version 3.12.0
 
 ### Collector configuration in OpenSearch

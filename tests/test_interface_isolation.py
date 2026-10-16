@@ -29,6 +29,7 @@ def make_collector(collector_class, interface_names, **config_attributes):
     collector._messenger = Mock()
     collector._healthcheck = Mock()
     collector.replay_failures = []
+    collector.disabled_interface_names = set()
     collector.args = Mock(replay=None)
     return collector
 

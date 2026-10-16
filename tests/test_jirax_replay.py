@@ -73,6 +73,7 @@ def make_collector(names, replay_names, retry=0):
     collector.should_stop_loop = False
     collector._healthcheck = Mock()
     collector.replay_failures = []
+    collector.disabled_interface_names = set()
     collector._flush_message_groups = Mock()
     collector.args = Mock(
         replay=ReplayArgs(
