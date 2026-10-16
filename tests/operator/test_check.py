@@ -75,12 +75,12 @@ CFG = build_collector_configuration(
 )
 
 
-def product(publication_date="2026-10-02T00:00:00.000Z"):
+def product(publication_date="2026-10-02T00:00:00.000Z", content_length=129873):
     return {
         "@odata.mediaContentType": "application/octet-stream",
         "Id": PRODUCT_ID,
         "Name": PRODUCT_NAME,
-        "ContentLength": 129873,
+        "ContentLength": content_length,
         "PublicationDate": publication_date,
     }
 
@@ -230,6 +230,34 @@ def test_query_uses_the_credentials_of_the_interface(checker, remote):
     assert url.startswith(REMOTE_URL)
     token = base64.b64encode(b"user:secret").decode()
     assert kwargs["headers"] == {"Authorization": f"Basic {token}"}
+    # the backend gives up on a check well before the default auth_timeout
+    assert kwargs["timeout"] == 20.0
+
+
+def test_timeout_bounds_the_query_and_the_token(
+    fake_opensearch, provider, remote, monkeypatch
+):
+    posts = []
+
+    def post(_session, url, **kwargs):
+        posts.append(kwargs)
+        return Response(
+            {"access_token": "tok", "token_type": "Bearer", "expires_in": 60}
+        )
+
+    monkeypatch.setattr(requests.Session, "post", post)
+    add_entries(
+        fake_opensearch,
+        entry(auth_method="OAuth", token_url="http://token.example", auth_timeout=120),
+    )
+    checker = ProductChecker("odata", CONFIG_INDEX, provider, "/tmp", timeout=5)
+    r = checker.check(by_name())
+    assert r.status == "ok"
+    (token_kwargs,) = posts
+    ((_url, kwargs),) = remote.calls
+    assert token_kwargs["timeout"] == 5
+    assert kwargs["timeout"] == 5
+    assert kwargs["headers"] == {"Authorization": "Bearer tok"}
 
 
 def test_present_on_remote_only(checker, remote):
@@ -288,6 +316,67 @@ def test_fields_only_in_maas_are_kept_like_a_collect(checker, remote, fake_opens
     r = checker.check(by_name())
     assert r.remote["dhus_tag"] == "added later"
     assert r.diff == []
+
+
+def test_stored_date_without_milliseconds_is_not_a_difference(
+    checker, remote, fake_opensearch
+):
+    store(fake_opensearch, stored_source("2026-10-02T00:00:00Z"))
+    remote.answer({"value": [product("2026-10-02T00:00:00.000Z")]})
+    r = checker.check(by_name())
+    assert r.status == "ok"
+    assert r.stored["publication_date"] == "2026-10-02T00:00:00.000Z"
+    assert r.diff == []
+
+
+def test_extraction_failure_is_an_error_reply(checker, remote):
+    remote.answer({"value": [product(content_length="not-a-number")]})
+    r = checker.check(by_name())
+    assert r.status == "error"
+    assert r.error.startswith("extraction failed: ")
+    assert "not-a-number" in r.error
+
+
+def test_extraction_without_document_is_an_error_reply(
+    fake_opensearch, provider, remote
+):
+    interface = entry()
+    interface["extractor"]["args"]["iterate_nodes"] = "$.value[0].Attributes"
+    add_entries(fake_opensearch, interface)
+    checker = ProductChecker("odata", CONFIG_INDEX, provider, "/tmp")
+    remote.answer({"value": [{**product(), "Attributes": []}]})
+    r = checker.check(by_name())
+    assert r.status == "error" and r.error == "extraction produced no document"
+
+
+def test_extractor_error_is_an_extraction_failure(fake_opensearch, provider, remote):
+    interface = entry()
+    interface["extractor"]["args"]["iterate_nodes"] = "$.nothing"
+    add_entries(fake_opensearch, interface)
+    checker = ProductChecker("odata", CONFIG_INDEX, provider, "/tmp")
+    remote.answer({"value": [product()]})
+    r = checker.check(by_name())
+    assert r.status == "error" and r.error.startswith("extraction failed: ")
+
+
+def test_missing_on_remote_but_in_maas(checker, remote, fake_opensearch):
+    store(fake_opensearch, stored_source("2026-10-02T00:00:00Z"))
+    remote.answer({"value": []})
+    r = checker.check(by_id())
+    assert r.status == "ok" and r.remote is None
+    assert r.stored["product_id"] == PRODUCT_ID
+    # normalised by the model like a remote document
+    assert r.stored["publication_date"] == "2026-10-02T00:00:00.000Z"
+    assert r.diff == []
+
+
+def test_unknown_id_in_maas_and_on_remote(checker, remote, fake_opensearch):
+    fake_opensearch.index(
+        index=PRODUCT_INDEX, id="other", body=stored_source(product_id="other")
+    )
+    remote.answer({"error": {"code": "404"}}, 404)
+    r = checker.check(by_id())
+    assert r.status == "ok" and r.remote is None and r.stored is None
 
 
 def test_single_entity_by_id(checker, remote, fake_opensearch):

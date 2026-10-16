@@ -31,6 +31,10 @@ LOGGER = logging.getLogger("maas_collector.operator")
 # fields that differ at each collect without the product changing
 IGNORED_FIELDS = ("reportName", "ingestionTime")
 
+# seconds a check may wait for the interface, token included: the backend gives up
+# on a check reply after 30 s
+DEFAULT_TIMEOUT = 20.0
+
 CHECKED_CLASS = "ODataCollectorConfiguration"
 
 
@@ -84,7 +88,12 @@ class ProductChecker:
     """Answer check requests for the odata interfaces of a service"""
 
     def __init__(
-        self, service: str, config_index: str, credential_provider, workdir: str
+        self,
+        service: str,
+        config_index: str,
+        credential_provider,
+        workdir: str,
+        timeout: float = DEFAULT_TIMEOUT,
     ):
         """
         Args:
@@ -93,11 +102,14 @@ class ProductChecker:
             credential_provider (CredentialProvider | None): credentials of the
                 interfaces, None for interfaces without credentials
             workdir (str): folder of the temporary payload files
+            timeout (float): seconds the query and the token request may take,
+                at most
         """
         self.service = service
         self.config_index = config_index
         self.credential_provider = credential_provider
         self.workdir = workdir
+        self.timeout = timeout
 
     def check(self, request: CheckRequest) -> CheckReply:
         """Ask the interface for the product and compare it with the stored one.
@@ -108,14 +120,18 @@ class ProductChecker:
             config = self.interface_config(request.interface_name)
             payload = self.query_remote(config, request)
             if payload is None:
-                return CheckReply("ok")
+                # maas may still have it, like a product evicted from the interface
+                return CheckReply(
+                    "ok",
+                    stored=self.find_stored(
+                        config, request.product_id or request.product_name
+                    ),
+                )
 
             action = self.would_store(config, payload)
-            if action is None:
-                return CheckReply("ok")
 
             remote = action["_source"]
-            stored = self.stored_source(action["_index"], action["_id"])
+            stored = self.stored_source(config, action["_index"], action["_id"])
 
             return CheckReply(
                 "ok",
@@ -202,6 +218,9 @@ class ProductChecker:
 
         self.set_credentials(config)
 
+        # the configuration is built for this check only
+        config.auth_timeout = min(config.auth_timeout, self.timeout)
+
         if config.get_config_protocol_version() != "v4":
             raise CheckNotPossible(
                 f"{interface_name} cannot be checked: only odata v4 supported"
@@ -234,8 +253,7 @@ class ProductChecker:
 
         CredentialMixin.set_credential_attributes(config, entries)
 
-    @staticmethod
-    def query_remote(config: ODataCollectorConfiguration, request: CheckRequest):
+    def query_remote(self, config: ODataCollectorConfiguration, request: CheckRequest):
         """Ask the interface for the product
 
         Returns:
@@ -255,7 +273,7 @@ class ProductChecker:
             response = http_session.get(
                 url,
                 headers=authentication.get_headers(),
-                timeout=config.auth_timeout,
+                timeout=self.timeout,
             )
 
         if request.product_id and response.status_code == 404:
@@ -282,8 +300,10 @@ class ProductChecker:
         """Run the extraction of the interface on the payload, like a collect does
 
         Returns:
-            dict | None: first bulk action (_source, _index, _id), None when the
-                extractor finds no document
+            dict: first bulk action (_source, _index, _id)
+
+        Raises:
+            ValueError: the extraction produced no document
         """
         os.makedirs(self.workdir, exist_ok=True)
 
@@ -305,24 +325,87 @@ class ProductChecker:
                 json.dump(payload, file_desc)
 
             # force_update yields the document even when maas has it unchanged
-            return next(
-                iter(
-                    ActionIterator(
-                        path,
-                        config,
-                        force_update=True,
-                        report_name=config.get_config_product_url(),
-                    )
-                ),
-                None,
+            actions = ActionIterator(
+                path,
+                config,
+                force_update=True,
+                report_name=config.get_config_product_url(),
             )
+            try:
+                action = next(iter(actions), None)
+            # whatever the extractor raises
+            # pylint: disable=broad-exception-caught
+            except Exception as error:
+                raise ValueError(f"extraction failed: {error}") from error
+
+        if action is None:
+            # a record the model refuses is only logged by the iterator
+            if actions.action_iterator_errors:
+                raise ValueError(
+                    "extraction failed: " + "; ".join(actions.action_iterator_errors)
+                )
+            raise ValueError("extraction produced no document")
+
+        return action
 
     @staticmethod
-    def stored_source(index: str, document_id: str):
+    def normalise(config: ODataCollectorConfiguration, source: dict) -> dict:
+        """A stored source as the model serialises it, like the remote document,
+        so that a format difference (like dates without milliseconds) is no
+        difference. The source unchanged if the model refuses it."""
+        try:
+            document = config.model(**source)
+            document.full_clean()
+            return document.to_dict()
+        # a stored document is shown even when it no longer fits its model
+        # pylint: disable=broad-exception-caught
+        except Exception as error:
+            LOGGER.warning("Stored document kept as is: %s", error)
+            return source
+
+    def stored_source(
+        self, config: ODataCollectorConfiguration, index: str, document_id: str
+    ):
         """Stored document, None when maas does not have it"""
         try:
-            return es_connections.get_connection().get(index=index, id=document_id)[
+            source = es_connections.get_connection().get(index=index, id=document_id)[
                 "_source"
             ]
         except NotFoundError:
             return None
+        return self.normalise(config, source)
+
+    def find_stored(self, config: ODataCollectorConfiguration, identifier: str):
+        """Best effort search of the stored document whose id_field is the
+        identifier of the request, for a product the interface does not have
+
+        Returns:
+            dict | None: first stored document found, None when none is found or
+                the search fails
+        """
+        if not isinstance(config.id_field, str):
+            # composite or computed identifier: no field to search on
+            return None
+
+        try:
+            hits = (
+                config.model.search()
+                .filter("term", **{config.id_field: identifier})
+                .extra(size=1)
+                .execute()
+            )
+        # the check still answers for the remote side
+        # pylint: disable=broad-exception-caught
+        except Exception as error:
+            LOGGER.warning(
+                "Cannot search %s=%s in %s: %s",
+                config.id_field,
+                identifier,
+                config.model.Index.name,
+                error,
+            )
+            return None
+
+        for hit in hits:
+            return self.normalise(config, hit.to_dict())
+        return None
