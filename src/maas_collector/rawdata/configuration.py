@@ -118,6 +118,12 @@ def build_collector_configuration(meta: dict, configuration_class, register=True
         CollectorConfiguration: build configuration instance
     """
 
+    if not isinstance(meta.get("enabled", True), bool):
+        raise ValueError(
+            f"enabled must be true or false, got {meta['enabled']!r}"
+            f" in {meta.get('interface_name')}"
+        )
+
     # copy meta args to leave argument untouched
     args = meta.copy()
 
