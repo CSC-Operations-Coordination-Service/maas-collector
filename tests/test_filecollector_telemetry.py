@@ -85,7 +85,11 @@ def test_publish_is_child_of_file_span(telemetry_capture, collector, sample_file
     with patch(BULK, return_value=RESULTS[:1]):
         collector.extract_from_file(sample_file, collector.configs[0])
     parent = telemetry_capture.span("collect.file")
-    assert telemetry_capture.span("publish ex").parent.span_id == parent.context.span_id
+    publish = telemetry_capture.span("publish ex")
+    assert publish.parent.span_id == parent.context.span_id
+    assert publish.context.trace_id == parent.context.trace_id
+    headers = collector._messenger._producer.publish.call_args.kwargs["headers"]
+    assert "maas.origin.interface" in headers["baggage"]
 
 
 def test_exception_still_measured(telemetry_capture, collector, sample_file):
@@ -145,3 +149,32 @@ def test_ingest_success_links_file_span(telemetry_capture, collector, sample_fil
     links = collector._messenger.send_to_queue.call_args.kwargs["links"]
     span_context = telemetry_capture.span("collect.file").context
     assert [link.span_id for link in links] == [span_context.span_id]
+
+
+def test_second_ingest_success_has_no_stale_links(
+    telemetry_capture, collector, sample_file
+):
+    config = collector.configs[0]
+    config.file_routing_key = "file.rk"
+    collector._messenger = Mock()
+    with patch(BULK, return_value=RESULTS[:1]):
+        collector.extract_from_file(sample_file, config)
+    collector.on_ingest_success(sample_file, config)
+    collector.on_ingest_success(sample_file, config)
+    calls = collector._messenger.send_to_queue.call_args_list
+    assert "links" in calls[0].kwargs
+    assert "links" not in calls[1].kwargs
+
+
+def test_bad_sidecar_still_measured(telemetry_capture, collector, sample_file):
+    with open(sample_file + "-maas-meta.json", "w", encoding="utf-8") as sidecar:
+        sidecar.write("{not json")
+    with patch(BULK, return_value=[]):
+        with pytest.raises(ValueError):
+            collector.extract_from_file(sample_file, collector.configs[0])
+    assert (
+        telemetry_capture.point("maas.collector.files", node=NODE, outcome="error").value
+        == 1
+    )
+    assert telemetry_capture.point("maas.collector.file.duration", node=NODE).count == 1
+    assert telemetry_capture.span("collect.file").status.status_code.name == "ERROR"

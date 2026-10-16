@@ -654,18 +654,18 @@ class FileCollector(CredentialMixin):
         if self.args.force:
             force_update = self.args.force
 
-        # initialize action dictionnary generator
-        self._action_iterator = ActionIterator(
-            path,
-            config,
-            force_update=force_update,
-            report_name=report_name,
-            report_folder=report_folder,
-            iter_callback=iter_callback,
-            extra_fields=extra_fields,
-        )
-
         with collector_file_scope(self, config, path) as scope:
+            # initialize action dictionnary generator
+            self._action_iterator = ActionIterator(
+                path,
+                config,
+                force_update=force_update,
+                report_name=report_name,
+                report_folder=report_folder,
+                iter_callback=iter_callback,
+                extra_fields=extra_fields,
+            )
+
             self.action_iterator_errors = []
             try:
                 # feed parallel_bulk with action iterator
@@ -1039,6 +1039,7 @@ class FileCollector(CredentialMixin):
             options = {}
             if self._last_collect_span_context is not None:
                 options["links"] = [self._last_collect_span_context]
+                self._last_collect_span_context = None
             self._messenger.send_to_queue(
                 config.file_routing_key,
                 MAASMessage(
