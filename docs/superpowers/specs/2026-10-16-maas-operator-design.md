@@ -251,6 +251,22 @@ collected" rules) and the docker-jobs recollect jobs read from the index (or
 from a `sync`ed folder), and the repo `configs/` + ansible-vault credential
 files are retired as sources, kept only as a `sync` target.
 
+## Carried from part 1 (maas-collector) into the later parts
+
+- Backend: `CheckRequest.to_body` emits both `product_name` and `product_id`, one
+  of them empty; treat `""` as absent.
+- Backend: a check can wait up to 5 s (idle poll, `OPERATOR_POLL_INTERVAL`) plus
+  20 s (`OPERATOR_CHECK_TIMEOUT`) before its reply; the backend's 30 s RPC wait
+  leaves little margin, so keep it at 30 s or more.
+- Backend: compute `lane` with `contract.lane_for`; the worker uses the queue's
+  lane for timeouts, not the body's.
+- Deployment: `stop_grace_period` of the worker must exceed the 10 s child
+  terminate grace (Docker's default is 10 s), or interrupted replays keep
+  RUNNING records.
+- Deployment: the worker has no health endpoint of its own.
+- Not covered by the worker: mpip still shifts its start date on replay, S3
+  replay is not implemented; neither is in `REPLAY_MODULES`.
+
 ## Left to the builder
 
 Index template details for `maas-operation`; check-reply payload shape and
