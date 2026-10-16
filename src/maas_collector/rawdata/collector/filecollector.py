@@ -22,7 +22,7 @@ from maas_collector.backup.backup import CollectorBackupConfiguration
 from opensearchpy.helpers import parallel_bulk
 from opensearchpy.connection.connections import connections as es_connections
 
-from maas_model import MAASRawDocument, MAASMessage
+from maas_model import MAASRawDocument, MAASMessage, telemetry
 
 from maas_collector.health import health
 from maas_collector.health.serverthread import ServerThread
@@ -43,6 +43,7 @@ from maas_collector.rawdata.configprovider import (
 
 from maas_collector.rawdata.messenger import Messenger
 from maas_collector.rawdata.replay import ReplayArgs
+from maas_collector.rawdata.telemetry import setup_telemetry
 
 from maas_collector.rawdata.collector.credentialmixin import CredentialMixin
 from maas_collector.rawdata.collector.credentialprovider import VaultArgs
@@ -118,6 +119,9 @@ class CollectorArgs:
     config_refresh_period: int = 300
 
     config_store: ConfigStoreArgs = None
+
+    # send OpenTelemetry traces and metrics, MAAS_TELEMETRY also enables it
+    telemetry: bool = False
 
 
 @dataclasses.dataclass
@@ -554,6 +558,8 @@ class FileCollector(CredentialMixin):
         # load json configuration
         self.load_config()
 
+        setup_telemetry(self)
+
         # connect signal to exit gracefully
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
@@ -975,6 +981,7 @@ class FileCollector(CredentialMixin):
             self.logger.info("Exiting run()")
             self.logger.debug(self.stats)
             self._flush_message_groups()
+            telemetry.shutdown()
 
     def create_report(self, path: str, errors):
         """write an ingestion error report

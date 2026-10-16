@@ -14,6 +14,7 @@ from opensearchpy.connection.connections import connections as es_connections
 import pytest
 from requests.exceptions import ConnectionError as RequestConnectionError
 
+from maas_model.telemetry.testing import telemetry_capture  # noqa: F401  pylint: disable=unused-import
 from maas_model.testing.fakevault import FakeVault
 
 from fakeopensearch import FakeOpenSearch

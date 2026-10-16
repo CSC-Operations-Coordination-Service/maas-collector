@@ -1413,6 +1413,16 @@ def common_parser() -> ArgumentParser:
         default=300,
     )
 
+    parser.add_argument(
+        "--telemetry",
+        dest="telemetry",
+        help="Send OpenTelemetry traces and metrics (or set MAAS_TELEMETRY)"
+        " (default: %(default)s)",
+        action="store_true",
+        required=False,
+        default=False,
+    )
+
     return parser
 
 
@@ -1451,6 +1461,7 @@ def get_collector_args(classobj, namespace, **kwargs):
         config_store=get_config_store_args(namespace),
         amqp_priority=namespace.amqp_priority,
         amqp_exchange=namespace.amqp_exchange,
+        telemetry=namespace.telemetry,
         **kwargs,
     )
 
