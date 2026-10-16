@@ -51,7 +51,7 @@ class AbstractODataQueryStrategy(AbstractHttpQueryStrategy):
             journal,
         )
 
-        if config.odata_start_offset:
+        if config.odata_start_offset and not journal.is_a_replay_journal:
             self.start_date = self.start_date - datetime.timedelta(
                 minutes=config.odata_start_offset
             )

@@ -51,9 +51,14 @@ class AbstractHttpQueryStrategy:
 
         if not end_date_without_offset:
             end_date_without_offset = datetime.datetime.now(datetime.UTC)
-        self.end_date = end_date_without_offset - datetime.timedelta(
-            minutes=config.end_date_time_offset
-        )
+        # a replay collects exactly the requested window: the offset only protects
+        # live collections from data not yet published
+        if journal.is_a_replay_journal:
+            self.end_date = end_date_without_offset
+        else:
+            self.end_date = end_date_without_offset - datetime.timedelta(
+                minutes=config.end_date_time_offset
+            )
 
         self.journal = journal
 
