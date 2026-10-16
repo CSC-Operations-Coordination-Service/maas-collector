@@ -269,6 +269,31 @@ files are retired as sources, kept only as a `sync` target.
 - Not covered by the worker: mpip still shifts its start date on replay, S3
   replay is not implemented; neither is in `REPLAY_MODULES`.
 
+## Carried from part 2 (maas-operator-backend) into the later parts
+
+- App: `GET /api/v1/capabilities` drives which pages exist (`features`, `allowed`
+  per verb, `max_window_hours`). Config `PUT` and rollback need `base_version`
+  (409 on a stale edit); credential `PUT` needs `expected_versions` for exactly
+  the services listed by `GET /credentials` (rows carry `kind`
+  shared|interface|both, `services` → field names or null, `versions`).
+  Interface-own entries override the shared entry field by field.
+- App: errors arrive as `{"detail": ...}`; recollect/check failures also carry
+  `operation_id`; 504 = no reply from the worker, 503 = no worker / broker, 502 =
+  OpenBao.
+- Deployment: the backend's AMQP user needs *configure* + write on
+  `maas-operator-exchange` (it declares the exchange, never a queue); workers
+  declare their queues.
+- Deployment: run `maas-operator-backend init-indices` once before first use
+  (otherwise `maas-operation` gets a dynamic mapping and filters stop matching).
+- Deployment: OpenBao AppRole of the admin backend: read + create/update on
+  `<mount>/data/<VAULT_PATH_ROOT>/*`, read on `<mount>/metadata/<VAULT_PATH_ROOT>/*`.
+- Deployment: verify once on the real stack that a recollect with no worker for
+  the service gives 503/FAILED, and that the worker's dates without milliseconds
+  are accepted by the `maas-operation` mapping (`strict_date_optional_time`).
+- Deployment: the image needs the maas-model fastapigen build (pending push of
+  the merged branch) and maas-collector ≥ the operator merge; pin git refs once
+  pushed.
+
 ## Left to the builder
 
 Index template details for `maas-operation`; check-reply payload shape and
