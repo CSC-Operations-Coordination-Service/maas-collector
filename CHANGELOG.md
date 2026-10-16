@@ -25,6 +25,13 @@
   `.maas-config-sync.json` of each service folder) that are no longer current, so
   other files of the folder, such as credentials, are never touched.
 
+- The operator worker replays an interface over a window in a `short` or `long` lane
+  of its service: it copies the service configuration from the index to a temporary
+  folder, runs the odata or jirax collector on it as a child process, and records
+  RUNNING, then DONE or FAILED with the exit code and the last output lines. The child
+  is killed at the lane timeout even when it prints nothing, and a disabled, deleted,
+  missing or non-replayable interface fails the operation with the reason.
+
 ## Version 3.12.0
 
 ### Collector configuration in OpenSearch

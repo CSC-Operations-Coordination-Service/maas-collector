@@ -1,0 +1,297 @@
+import datetime
+import os
+import sys
+import threading
+import time
+
+import pytest
+
+from fakeopensearch import add_config_document
+
+from maas_collector.rawdata.configstore import ConfigStore
+from maas_collector.rawdata.operator.contract import ReplayRequest
+from maas_collector.rawdata.operator.records import DONE, FAILED, RUNNING
+from maas_collector.rawdata.operator.replay import (
+    ChildRunner,
+    ReplayLane,
+    ReplayNotPossible,
+    build_command,
+    child_environment,
+    find_entry,
+    replay_timeout,
+)
+
+START = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
+
+
+def req(days=1, lane="short", name="ITF_A", operation_id="op1"):
+    return ReplayRequest(
+        operation_id,
+        name,
+        START,
+        START + datetime.timedelta(days=days),
+        "bob",
+        lane,
+    )
+
+
+def entry(name="ITF_A", cls="ODataCollectorConfiguration", **extra):
+    return {"class": cls, "interface_name": name, **extra}
+
+
+@pytest.fixture
+def store(fake_opensearch):
+    return ConfigStore(fake_opensearch)
+
+
+def add(client, path, collectors, services=("odata",), **kwargs):
+    add_config_document(
+        client, path, 1, list(services), {"collectors": collectors}, **kwargs
+    )
+
+
+def test_command_for_an_odata_entry():
+    command = build_command("odata", "/c", req(), 18081)
+    assert command[:4] == [
+        sys.executable,
+        "-m",
+        "maas_collector.rawdata.cli.odata",
+        "-v",
+    ]
+    assert command[4:] == [
+        "-d",
+        "/c",
+        "--healthcheck-port",
+        "18081",
+        "--replay-interface-name",
+        "ITF_A",
+        "--replay-start-date",
+        "2026-10-01T00:00:00Z",
+        "--replay-end-date",
+        "2026-10-02T00:00:00Z",
+        "--replay-suffix",
+        "op1",
+    ]
+
+
+def test_jira_entry_uses_jirax(store, fake_opensearch):
+    add(
+        fake_opensearch,
+        "j.json",
+        [entry("JIRA", "JiraExtendedCollectorConfiguration")],
+        ["jira"],
+    )
+    found = find_entry(store, "jira", "JIRA")
+    assert found["class"] == "JiraExtendedCollectorConfiguration"
+    assert build_command("jirax", "/c", req(), 1)[2].endswith(".jirax")
+
+
+def test_find_entry_returns_the_raw_entry(store, fake_opensearch):
+    add(fake_opensearch, "a.json", [entry("OTHER"), entry(foo=1)])
+    assert find_entry(store, "odata", "ITF_A") == entry(foo=1)
+
+
+@pytest.mark.parametrize(
+    "case, message",
+    [
+        ("missing", "not found"),
+        ("deleted", "is deleted"),
+        ("other_service", "only to sftp"),
+        ("disabled", "is disabled"),
+        ("s3_class", "cannot be replayed"),
+    ],
+)
+def test_find_entry_refuses(store, fake_opensearch, case, message):
+    if case == "deleted":
+        add(fake_opensearch, "a.json", [entry()], deleted=True)
+    elif case == "other_service":
+        add(fake_opensearch, "a.json", [entry()], ["sftp"])
+    elif case == "disabled":
+        add(fake_opensearch, "a.json", [entry(enabled=False)])
+    elif case == "s3_class":
+        add(fake_opensearch, "a.json", [entry(cls="S3CollectorConfiguration")])
+    with pytest.raises(ReplayNotPossible, match=message):
+        find_entry(store, "odata", "ITF_A")
+
+
+def test_child_environment_drops_the_config_backend():
+    env = child_environment(
+        {
+            "CONFIG_BACKEND": "opensearch",
+            "CONFIG_SERVICE": "odata",
+            "CONFIG_INDEX": "i",
+            "REPLAY_FOO": "1",
+            "ES_URL": "http://x",
+            "PATH": "/bin",
+        }
+    )
+    assert env == {"ES_URL": "http://x", "PATH": "/bin"}
+
+
+def test_long_timeout_scales_with_the_window():
+    assert replay_timeout(req(days=10, lane="long"), 6 * 3600, 3 * 3600) == 30 * 3600
+    assert replay_timeout(req(days=1, lane="long"), 6 * 3600, 3 * 3600) == 6 * 3600
+    assert replay_timeout(req(days=1), 6 * 3600, 3 * 3600) == 6 * 3600
+
+
+def test_silent_child_is_killed_at_the_timeout():
+    started = time.monotonic()
+    code, tail = ChildRunner().run(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        os.environ.copy(),
+        timeout=1,
+        progress=lambda _: None,
+    )
+    assert code == -9
+    assert "killed after 1s" in tail
+    assert time.monotonic() - started < 10
+
+
+def test_runner_returns_exit_code_and_last_lines():
+    script = "import sys\nfor i in range(30): print('line', i)\nsys.exit(3)"
+    code, tail = ChildRunner().run(
+        [sys.executable, "-c", script], os.environ.copy(), 30, lambda _: None
+    )
+    lines = tail.splitlines()
+    assert code == 3
+    assert len(lines) == 20
+    assert lines[-1] == "line 29"
+
+
+def test_runner_reports_progress_while_the_child_is_silent():
+    seen = []
+    code, _ = ChildRunner().run(
+        [sys.executable, "-c", "import time; print('hi', flush=True); time.sleep(1.5)"],
+        os.environ.copy(),
+        30,
+        seen.append,
+        progress_interval=0.3,
+    )
+    assert code == 0
+    assert len(seen) >= 2
+    assert "hi" in seen[-1]
+
+
+def test_terminate_stops_the_running_child_and_is_a_noop_otherwise():
+    runner = ChildRunner()
+    runner.terminate()
+    result = []
+    thread = threading.Thread(
+        target=lambda: result.append(
+            runner.run(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                os.environ.copy(),
+                60,
+                lambda _: None,
+            )
+        )
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while runner._child is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    runner.terminate()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert result[0][0] != 0
+    assert "killed after" not in result[0][1]
+    runner.terminate()
+
+
+class FakeRecorder:
+    def __init__(self):
+        self.calls = []
+
+    def update(self, operation_id, status, exit_code=None, details=None):
+        call = (operation_id, status)
+        if exit_code is not None:
+            call += (exit_code,)
+        self.calls.append(call)
+        self.details = details
+        return True
+
+
+class FakeRunner:
+    def __init__(self, code=0, tail="done", boom=None):
+        self.code, self.tail, self.boom = code, tail, boom
+        self.commands = []
+
+    def run(self, command, env, timeout, progress, progress_interval=30):
+        self.commands.append((command, env, timeout))
+        self.conf_files = sorted(
+            name
+            for name in os.listdir(command[command.index("-d") + 1])
+            if not name.startswith(".")
+        )
+        if self.boom:
+            raise self.boom
+        return self.code, self.tail
+
+
+def lane(store, runner, tmp_path, recorder=None):
+    recorder = recorder or FakeRecorder()
+    return (
+        ReplayLane(
+            "odata",
+            "short",
+            store,
+            recorder,
+            runner,
+            str(tmp_path),
+            18081,
+            100,
+            50,
+        ),
+        recorder,
+    )
+
+
+@pytest.fixture
+def odata_store(store, fake_opensearch):
+    add(fake_opensearch, "a.json", [entry()])
+    return store
+
+
+def test_handle_records_running_then_done(odata_store, tmp_path):
+    runner = FakeRunner()
+    replay, recorder = lane(odata_store, runner, tmp_path)
+    replay.handle(req())
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    command, env, timeout = runner.commands[0]
+    assert command[command.index("-d") + 1] == str(tmp_path / "op1" / "odata")
+    assert runner.conf_files == ["a.json"]
+    assert timeout == 100
+
+
+def test_handle_records_failed_with_exit_code_and_tail(odata_store, tmp_path):
+    replay, recorder = lane(odata_store, FakeRunner(75, "boom line"), tmp_path)
+    replay.handle(req())
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED, 75)]
+    assert "exit code 75" in recorder.details
+    assert "boom line" in recorder.details
+
+
+def test_handle_of_a_disabled_interface_records_failed_and_returns(
+    store, fake_opensearch, tmp_path
+):
+    add(fake_opensearch, "a.json", [entry(enabled=False)])
+    runner = FakeRunner()
+    replay, recorder = lane(store, runner, tmp_path)
+    replay.handle(req())
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "disabled" in recorder.details
+    assert runner.commands == []
+
+
+def test_handle_removes_its_config_copy(odata_store, tmp_path):
+    replay, _ = lane(odata_store, FakeRunner(), tmp_path)
+    replay.handle(req())
+    assert not (tmp_path / "op1").exists()
+
+
+def test_handle_never_raises_and_cleans_up(odata_store, tmp_path):
+    replay, recorder = lane(odata_store, FakeRunner(boom=OSError("no exec")), tmp_path)
+    replay.handle(req())
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "no exec" in recorder.details
+    assert not (tmp_path / "op1").exists()
