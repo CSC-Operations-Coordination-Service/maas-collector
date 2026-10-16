@@ -25,6 +25,21 @@
   `.maas-config-sync.json` of each service folder) that are no longer current, so
   other files of the folder, such as credentials, are never touched.
 
+### Operator worker
+
+- `python -m maas_collector.rawdata.cli.operator_worker` serves the replay and check
+  requests of one collector service (`CONFIG_SERVICE`, required) published by the
+  operator backend on the `maas-operator-exchange` topic exchange: one thread per
+  replay lane, `maas-operator-<service>-replay-short` and `-long`, and one for
+  `maas-operator-<service>-check`, so a check is answered while replays run. A replay
+  request is acknowledged on receipt and never redelivered: one lost to a crash keeps
+  its record RUNNING. A malformed request is logged and skipped, and its record goes
+  FAILED when it has an `operation_id`. A check reply goes to `reply_to` on the
+  default exchange with the `correlation_id` of the request and expires after 60 s;
+  a check without `reply_to` is dropped. SIGTERM and SIGINT stop taking requests and
+  terminate the running collectors. The `OPERATOR_*` settings are described in
+  `docs/operator_worker.md`.
+
 - The operator worker replays an interface over a window in a `short` or `long` lane
   of its service: it copies the service configuration from the index to a temporary
   folder, runs the odata or jirax collector on it as a child process, and records
@@ -38,9 +53,10 @@
   and replies both with their differing fields, `reportName` and `ingestionTime` left
   out. A product the interface no longer has is still looked up in maas by its
   `id_field`. A quote in a name is escaped as `''` in the filter. The interface and its
-  token request get 20 s at most. A missing, disabled, non odata or odata v3
-  interface, an error answer of the interface, or a product the extraction refuses is
-  an error reply.
+  token request get 20 s at most (`OPERATOR_CHECK_TIMEOUT`), the backend waiting 30 s
+  for the reply. A missing, disabled, non odata or odata v3 interface, an error answer
+  of the interface, a product the extraction refuses or a malformed request is an
+  error reply.
 
 ## Version 3.12.0
 
