@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -35,7 +36,13 @@ TERMINATE_GRACE = 10
 KILLED_EXIT_CODE = -9
 SECONDS_PER_DAY = 86400
 
-DROPPED_ENVIRONMENT = ("CONFIG_BACKEND", "CONFIG_SERVICE", "CONFIG_INDEX")
+DROPPED_ENVIRONMENT = (
+    "CONFIG_BACKEND",
+    "CONFIG_SERVICE",
+    "CONFIG_INDEX",
+    "RAWDATA_CONFIG",
+    "RAWDATA_CONFIG_DIR",
+)
 DROPPED_PREFIX = "REPLAY_"
 
 
@@ -181,6 +188,8 @@ class ChildRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
             )
             self._child = child
@@ -226,6 +235,9 @@ class ChildRunner:
         finally:
             with self._lock:
                 self._child = None
+            if child.poll() is None:
+                self._kill(child)
+                child.wait()
 
         if timed_out:
             tail.append(f"killed after {timeout}s")
@@ -262,9 +274,12 @@ class ReplayLane:
 
     def handle(self, request: ReplayRequest) -> None:
         """Replay the request and record its outcome; never raises"""
-        copy = os.path.join(self.workdir, request.operation_id)
+        copy = None
         try:
             self.recorder.update(request.operation_id, RUNNING)
+            os.makedirs(self.workdir, exist_ok=True)
+            # never built from the request: operation_id is not a safe file name
+            copy = tempfile.mkdtemp(dir=self.workdir, prefix="replay-")
             entry = find_entry(self.store, self.service, request.interface_name)
             sync_configs(self.store, copy, [self.service])
             command = build_command(
@@ -300,7 +315,8 @@ class ReplayLane:
                 request.operation_id, FAILED, details=f"{type(error).__name__}: {error}"
             )
         finally:
-            shutil.rmtree(copy, ignore_errors=True)
+            if copy is not None:
+                shutil.rmtree(copy, ignore_errors=True)
 
     @staticmethod
     def _failure_details(code: int, tail: str) -> str:
