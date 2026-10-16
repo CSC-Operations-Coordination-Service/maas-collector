@@ -1,9 +1,10 @@
 """Message bus tools"""
 
+import contextlib
 import dataclasses
 import json
 import logging
-from typing import Dict
+from typing import Dict, List, Sequence, Tuple
 import socket
 
 
@@ -11,13 +12,35 @@ from kombu import BrokerConnection, Exchange, Producer
 from kombu.common import maybe_declare
 from kombu.utils.url import maybe_sanitize_url
 
-from maas_model import MAASMessage
+from maas_model import MAASMessage, telemetry
+from maas_model.telemetry import metrics
 
+from maas_collector.rawdata.telemetry import node_name
 from maas_collector.queues.queues import (
     DEFAULT_PUBLISH_EXCHANGE_NAME,
     build_publish_exchange,
 )
 
+
+@contextlib.contextmanager
+def _detached():
+    """run with no current span, so a chunk publish is a root span that links
+    to its files instead of hanging under whichever file completed the chunk"""
+    if not telemetry.enabled():
+        yield
+        return
+    # pylint: disable=import-outside-toplevel
+    from opentelemetry import context as otel_context
+
+    token = otel_context.attach(otel_context.Context())
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
+
+
+# most file span contexts linked to one chunked message
+MAX_GROUP_LINKS = 128
 
 
 def parse_chunk_config(json_dict: dict) -> dict:
@@ -104,6 +127,10 @@ class Messenger:
         # grouped messages, keyed by (exchange name, routing key): two
         # configurations may share a routing key and differ in exchange
         self.message_groups = {}
+
+        # span contexts of the files feeding each group, keyed like the groups
+        # plus the model name: (exchange name, routing key, model name)
+        self._group_links: Dict[Tuple[str, str, str], List] = {}
 
         # Exchange instances by name, built on demand
         self._exchanges: Dict[str, Exchange] = {}
@@ -242,6 +269,15 @@ class Messenger:
         # not carry the field working.
         exchange_name = getattr(config, "exchange_name", "") or self.exchange_name
 
+        metrics.COLLECTOR_DOCUMENTS_ROUTED.add(
+            1,
+            {
+                "node": node_name(config),
+                "exchange": exchange_name,
+                "routing_key": config.routing_key,
+            },
+        )
+
         document_indices = [index] if index is not None else []
 
         if not config.routing_key in self.chunk_config:
@@ -277,6 +313,17 @@ class Messenger:
             info["document_ids"] = []
             info["document_indices"] = []
 
+        links = self._group_links.setdefault(
+            (exchange_name, config.routing_key, config.model_name), []
+        )
+        span_context = telemetry.current_span_context()
+        if (
+            span_context is not None
+            and span_context not in links
+            and len(links) < MAX_GROUP_LINKS
+        ):
+            links.append(span_context)
+
         info["document_ids"].append(document_id)
 
         if index is not None and index not in info["document_indices"]:
@@ -291,20 +338,28 @@ class Messenger:
             )
 
             # send the chunk
-            self.send_to_queue(
-                config.routing_key,
-                MAASMessage(
-                    document_class=config.model_name,
-                    document_ids=info["document_ids"][:chunk_size],
-                    document_indices=info["document_indices"][:chunk_size],
-                    pipeline=[self.pipeline_name],
-                ),
-                exchange_name=exchange_name,
-            )
+            with _detached():
+                self.send_to_queue(
+                    config.routing_key,
+                    MAASMessage(
+                        document_class=config.model_name,
+                        document_ids=info["document_ids"][:chunk_size],
+                        document_indices=info["document_indices"][:chunk_size],
+                        pipeline=[self.pipeline_name],
+                    ),
+                    exchange_name=exchange_name,
+                    links=links,
+                )
 
             # remove the chunk
             del info["document_ids"][:chunk_size]
             del info["document_indices"][:chunk_size]
+
+        if not info["document_ids"]:
+            # nothing left buffered: the linked files were all sent
+            self._group_links.pop(
+                (exchange_name, config.routing_key, config.model_name), None
+            )
 
     def flush_message_groups(self):
         """clear the document identifier cache"""
@@ -324,12 +379,20 @@ class Messenger:
                         pipeline=[self.pipeline_name],
                     ),
                     exchange_name=exchange_name,
+                    links=self._group_links.get(
+                        (exchange_name, routing_key, model_name), ()
+                    ),
                 )
 
         self.message_groups.clear()
+        self._group_links.clear()
 
     def send_to_queue(
-        self, routing_key: str, payload: MAASMessage, exchange_name: str = ""
+        self,
+        routing_key: str,
+        payload: MAASMessage,
+        exchange_name: str = "",
+        links: Sequence = (),
     ):
         """send creation / update message to rabbitmq
 
@@ -338,6 +401,7 @@ class Messenger:
             payload (MAASMessage): payload containing document ids and indices
             exchange_name (str, optional): destination exchange. Defaults to the
                 messenger one.
+            links (Sequence, optional): span contexts linked to the publish span
         """
         # Keep only unique index
         payload.document_indices = list(set(payload.document_indices))
@@ -364,22 +428,32 @@ class Messenger:
 
             self._declare(exchange, producer.channel)
 
-            producer.publish(
-                json_body,
-                content_type="application/json",
-                exchange=exchange,
-                routing_key=routing_key,
-                delivery_mode="persistent",
-                mandatory=True,
-                retry=True,
-                priority=self.priority,
-                retry_policy={
-                    "interval_start": 0,  # First retry immediately,
-                    "interval_step": 2,  # then increase by 2s for every retry.
-                    "interval_max": 30,  # but don't exceed 30s between retries.
-                    "max_retries": self.max_retries,  # give up after X tries.
-                },
-            )
+            with telemetry.amqp.publish_span(
+                exchange.name,
+                routing_key,
+                message_id=payload.message_id,
+                document_count=len(payload.document_ids),
+                document_class=payload.document_class,
+                body_size=len(json_body),
+                links=links,
+            ) as headers:
+                producer.publish(
+                    json_body,
+                    content_type="application/json",
+                    exchange=exchange,
+                    routing_key=routing_key,
+                    delivery_mode="persistent",
+                    mandatory=True,
+                    retry=True,
+                    priority=self.priority,
+                    headers=headers,
+                    retry_policy={
+                        "interval_start": 0,  # First retry immediately,
+                        "interval_step": 2,  # then increase by 2s for every retry.
+                        "interval_max": 30,  # but don't exceed 30s between retries.
+                        "max_retries": self.max_retries,  # give up after X tries.
+                    },
+                )
             self.logger.info(
                 "MSG %s PUBLISHED TO %s/%s %d %s",
                 payload.message_id,
@@ -416,7 +490,11 @@ class Messenger:
 
         for details
         """
-        if exception.args[1] == "NO_ROUTE":
+        no_route = exception.args[1] == "NO_ROUTE"
+        telemetry.amqp.returned(
+            exchange, routing_key, "NO_ROUTE" if no_route else "other"
+        )
+        if no_route:
             self.logger.warning(
                 "AMQP exchange %s has no route for %s", exchange, routing_key
             )

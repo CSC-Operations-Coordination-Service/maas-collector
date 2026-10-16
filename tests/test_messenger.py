@@ -21,6 +21,8 @@ class FakeConfig:
 
     exchange_name: str = ""
 
+    interface_name: str = ""
+
 
 @pytest.fixture
 def messenger():
