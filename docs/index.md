@@ -12,6 +12,8 @@ maas-collector is the component that ingest data files into MAAS raw database fo
 
 - [Configuration in OpenSearch](opensearch_config)
 
+- [Operator worker](operator_worker)
+
 - [Backup](backup)
 
 - [Vault credentials](vault)
