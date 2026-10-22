@@ -11,6 +11,7 @@ import socket
 import sys
 
 import kombu
+from maas_engine.replay import Lane, LaneTimeout, OperationRecorder, ReplayWorker
 from opensearchpy.connection.connections import connections as es_connections
 
 import maas_collector.rawdata.cli.lib.log as maas_log
@@ -25,10 +26,18 @@ from maas_collector.rawdata.collector.credentialprovider import (
 from maas_collector.rawdata.collector.filecollector import CollectorArgs
 from maas_collector.rawdata.configstore import ConfigStore
 from maas_collector.rawdata.operator.check import ProductChecker
-from maas_collector.rawdata.operator.contract import LANES
-from maas_collector.rawdata.operator.records import OperationRecorder
-from maas_collector.rawdata.operator.replay import ChildRunner, ReplayLane
-from maas_collector.rawdata.operator.worker import OperatorSettings, OperatorWorker
+from maas_collector.rawdata.operator.contract import (
+    LANES,
+    exchange,
+    replay_queue_name,
+    replay_routing_key,
+)
+from maas_collector.rawdata.operator.handler import CollectorReplayHandler
+from maas_collector.rawdata.operator.worker import (
+    CheckWorker,
+    OperatorSettings,
+    OperatorWorker,
+)
 
 # seconds between two AMQP heartbeats
 AMQP_HEARTBEAT = 60
@@ -142,22 +151,26 @@ def operator_worker_main(argv: list[str]) -> int:
     store = ConfigStore(client, settings.config_index)
     recorder = OperationRecorder(client, settings.operation_index)
 
-    lanes = {
-        lane: ReplayLane(
-            settings.service,
+    # the short lane has a fixed timeout, the long one scales with the window
+    lanes = [
+        Lane(
             lane,
-            store,
-            recorder,
-            # the two lanes can each run a child
-            ChildRunner(),
-            settings.workdir,
-            settings.healthcheck_port + offset,
-            settings.short_timeout,
-            settings.long_timeout_per_day,
-            settings.replay_retry,
+            replay_queue_name(settings.service, lane),
+            replay_routing_key(settings.service, lane),
+            LaneTimeout(
+                base=settings.short_timeout,
+                per_day=settings.long_timeout_per_day if lane == "long" else 0,
+            ),
         )
-        for offset, lane in enumerate(LANES)
-    }
+        for lane in LANES
+    ]
+    handler = CollectorReplayHandler(
+        store,
+        settings.service,
+        LANES,
+        settings.healthcheck_port,
+        settings.replay_retry,
+    )
 
     checker = ProductChecker(
         settings.service,
@@ -179,7 +192,16 @@ def operator_worker_main(argv: list[str]) -> int:
             },
         )
 
-    worker = OperatorWorker(connect, settings, lanes, checker)
+    replays = ReplayWorker(
+        connect,
+        recorder,
+        handler,
+        lanes,
+        exchange(),
+        settings.workdir,
+        poll_interval=settings.poll_interval,
+    )
+    worker = OperatorWorker(replays, CheckWorker(connect, settings, checker))
     signal.signal(signal.SIGTERM, worker.stop)
     signal.signal(signal.SIGINT, worker.stop)
     worker.run()

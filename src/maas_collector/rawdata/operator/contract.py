@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 import kombu
 
 EXCHANGE_NAME = "maas-operator-exchange"
+# index of the operation records the backend writes and the worker updates
+OPERATION_INDEX = "maas-operation"
 LANES = ("short", "long")
 SHORT_LANE_MAX = datetime.timedelta(hours=24)
 

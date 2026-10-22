@@ -8,8 +8,7 @@ from unittest.mock import patch
 
 import kombu
 import pytest
-
-from fakeopensearch import add_config_document
+from maas_engine.replay import ChildRunner, Lane, LaneTimeout, ReplayWorker
 
 from maas_collector.rawdata.cli.operator_worker import (
     build_settings,
@@ -27,11 +26,11 @@ from maas_collector.rawdata.operator.contract import (
     replay_queue_name,
     replay_routing_key,
 )
-from maas_collector.rawdata.configstore import ConfigStore
-from maas_collector.rawdata.operator import replay
-from maas_collector.rawdata.operator.records import FAILED
-from maas_collector.rawdata.operator.replay import ChildRunner, ReplayLane
-from maas_collector.rawdata.operator.worker import OperatorSettings, OperatorWorker
+from maas_collector.rawdata.operator.worker import (
+    CheckWorker,
+    OperatorSettings,
+    OperatorWorker,
+)
 
 START = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
 
@@ -77,47 +76,27 @@ class FakeRecorder:
         return True
 
 
-class FakeRunner:
-    def __init__(self):
-        self.terminated = 0
+class FakeHandler:
+    """the collector's handler, replaced: records the requests, runs a child"""
 
-    def terminate(self):
-        self.terminated += 1
-
-
-class FakeLane:
-    def __init__(self, block=None, runner=None):
-        self.handled = []
+    def __init__(self, code="print('replayed')"):
+        self.code = code
+        self.requests = []
         self.started = threading.Event()
-        self.block = block
-        self.recorder = FakeRecorder()
-        self.runner = runner or FakeRunner()
+        self.block = None
 
-    def handle(self, request):
-        self.handled.append(request)
+    def prepare(self, request, lane, workdir):
+        self.requests.append((lane, request.operation_id))
         self.started.set()
         if self.block is not None:
             self.block.wait(5)
+        return None
 
+    def command(self, prepared, request, lane):
+        return [sys.executable, "-u", "-c", self.code], {}
 
-class SleepingLane(FakeLane):
-    """runs a child that sleeps a minute with a real ChildRunner"""
-
-    def __init__(self):
-        super().__init__(runner=ChildRunner())
-        self.results = []
-
-    def handle(self, request):
-        self.handled.append(request)
-        self.started.set()
-        self.results.append(
-            self.runner.run(
-                [sys.executable, "-c", "import time; time.sleep(60)"],
-                {},
-                60,
-                lambda lines: None,
-            )
-        )
+    def cleanup(self, prepared):
+        pass
 
 
 class FakeChecker:
@@ -132,13 +111,33 @@ class FakeChecker:
 class Harness:
     """an OperatorWorker on the memory transport, run in a thread"""
 
-    def __init__(self, lanes=None, checker=None, service=None):
+    def __init__(self, handler=None, checker=None, service=None):
         self.service = service or "svc" + uuid.uuid4().hex[:8]
-        self.lanes = lanes or {lane: FakeLane() for lane in LANES}
+        self.handler = handler or FakeHandler()
         self.checker = checker or FakeChecker()
+        self.recorder = FakeRecorder()
         self.settings = OperatorSettings(service=self.service, poll_interval=0.01)
+        lanes = [
+            Lane(
+                lane,
+                replay_queue_name(self.service, lane),
+                replay_routing_key(self.service, lane),
+                LaneTimeout(base=60),
+            )
+            for lane in LANES
+        ]
+        self.replays = ReplayWorker(
+            connect,
+            self.recorder,
+            self.handler,
+            lanes,
+            exchange(),
+            "/tmp",
+            poll_interval=0.01,
+        )
         self.worker = OperatorWorker(
-            connect, self.settings, self.lanes, self.checker, sleep=time.sleep
+            self.replays,
+            CheckWorker(connect, self.settings, self.checker, sleep=time.sleep),
         )
         self.thread = threading.Thread(target=self.worker.run, daemon=True)
         self.declare()
@@ -215,64 +214,34 @@ def get_reply(name, timeout=5.0):
     raise AssertionError(f"no reply on {name}")
 
 
-def test_replay_message_reaches_its_lane(harness):
+def test_replay_message_reaches_the_lane_of_its_queue(harness):
     harness.start()
     harness.publish(replay_routing_key(harness.service, "long"), REQ_LONG.to_body())
+    harness.publish(replay_routing_key(harness.service, "short"), REQ_SHORT.to_body())
 
-    wait_for(lambda: harness.lanes["long"].handled)
+    wait_for(
+        lambda: {u[0] for u in harness.recorder.updates if u[1] == "DONE"}
+        == {"op-long", "op-short"}
+    )
     harness.stop()
 
-    assert harness.lanes["long"].handled == [REQ_LONG]
-    assert harness.lanes["short"].handled == []
+    assert sorted(harness.handler.requests) == [
+        ("long", "op-long"),
+        ("short", "op-short"),
+    ]
 
 
 def test_replay_request_is_acked_on_receipt(harness):
     block = threading.Event()
-    harness.lanes["short"].block = block
+    harness.handler.block = block
     harness.start()
     harness.publish(replay_routing_key(harness.service, "short"), REQ_SHORT.to_body())
 
-    wait_for(harness.lanes["short"].started.is_set)
+    wait_for(harness.handler.started.is_set)
     # still running, already gone from the queue
     assert harness.queue_size(replay_queue_name(harness.service, "short")) == 0
     block.set()
     harness.stop()
-
-
-def test_malformed_replay_body_is_skipped_and_worker_keeps_running(harness, caplog):
-    harness.start()
-    with caplog.at_level(logging.ERROR, logger="maas_collector.operator"):
-        harness.publish(replay_routing_key(harness.service, "short"), "not json")
-        harness.publish(
-            replay_routing_key(harness.service, "short"), REQ_SHORT.to_body()
-        )
-        wait_for(lambda: harness.lanes["short"].handled)
-    harness.stop()
-
-    assert harness.lanes["short"].handled == [REQ_SHORT]
-    assert harness.lanes["short"].recorder.updates == []
-    assert harness.queue_size(replay_queue_name(harness.service, "short")) == 0
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert "malformed replay request" in errors[0].getMessage()
-
-
-def test_malformed_body_with_operation_id_records_failed(harness):
-    harness.start()
-    harness.publish(
-        replay_routing_key(harness.service, "long"),
-        {"operation_id": "op9", "interface_name": "ITF_A"},
-    )
-
-    recorder = harness.lanes["long"].recorder
-    wait_for(lambda: recorder.updates)
-    harness.stop()
-
-    assert harness.lanes["long"].handled == []
-    [(operation_id, status, exit_code, details)] = recorder.updates
-    assert (operation_id, status, exit_code) == ("op9", FAILED, None)
-    assert "malformed replay request" in details
-    assert "start_date" in details
 
 
 def test_check_reply_goes_to_reply_to_with_correlation_id(harness):
@@ -333,10 +302,10 @@ def test_malformed_check_gets_an_error_reply(harness):
 
 def test_check_is_answered_while_a_long_replay_runs(harness):
     block = threading.Event()
-    harness.lanes["long"].block = block
+    harness.handler.block = block
     harness.start()
     harness.publish(replay_routing_key(harness.service, "long"), REQ_LONG.to_body())
-    wait_for(harness.lanes["long"].started.is_set)
+    wait_for(harness.handler.started.is_set)
 
     reply_to = reply_queue()
     harness.publish(
@@ -355,106 +324,26 @@ def test_check_is_answered_while_a_long_replay_runs(harness):
 
 
 def test_stop_terminates_a_running_child():
-    lane = SleepingLane()
-    harness = Harness(lanes={"short": lane, "long": FakeLane()})
+    handler = FakeHandler("import time; time.sleep(60)")
+    harness = Harness(handler=handler)
     harness.start()
     harness.publish(replay_routing_key(harness.service, "short"), REQ_SHORT.to_body())
-    wait_for(lane.started.is_set)
+    wait_for(handler.started.is_set)
     # let the child start
-    wait_for(lambda: lane.runner._child is not None)
+    wait_for(lambda: harness.replays.runners["short"]._child is not None)
 
     started = time.monotonic()
     harness.stop()
 
     assert time.monotonic() - started < 5
-    [(code, _tail)] = lane.results
-    assert code != 0
+    assert harness.recorder.updates[-1][1] == "FAILED"
 
 
-class BlockingRecorder(FakeRecorder):
-    """holds the first update until released, like a slow OpenSearch"""
-
-    def __init__(self):
-        super().__init__()
-        self.entered = threading.Event()
-        self.release = threading.Event()
-
-    def update(self, operation_id, status, exit_code=None, details=None):
-        if not self.entered.is_set():
-            self.entered.set()
-            self.release.wait(5)
-        return super().update(operation_id, status, exit_code, details)
-
-
-def test_stop_before_the_child_starts_spawns_none(
-    fake_opensearch, tmp_path, monkeypatch
-):
-    popen_calls = []
-    monkeypatch.setattr(
-        replay.subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args)
-    )
-    service = "svc" + uuid.uuid4().hex[:8]
-    add_config_document(
-        fake_opensearch,
-        "a.json",
-        1,
-        [service],
-        {
-            "collectors": [
-                {"class": "ODataCollectorConfiguration", "interface_name": "ITF_A"}
-            ]
-        },
-    )
-    recorder = BlockingRecorder()
-    lane = ReplayLane(
-        service,
-        "short",
-        ConfigStore(fake_opensearch),
-        recorder,
-        ChildRunner(),
-        str(tmp_path),
-        18081,
-        60,
-        60,
-        3,
-    )
-    harness = Harness(lanes={"short": lane, "long": FakeLane()}, service=service)
-    harness.start()
-    harness.publish(replay_routing_key(service, "short"), REQ_SHORT.to_body())
-    # handle is in its OpenSearch round trips, before runner.run
-    wait_for(recorder.entered.is_set)
-
-    harness.worker.stop()
-    recorder.release.set()
-    harness.thread.join(10)
-
-    assert not harness.thread.is_alive()
-    assert popen_calls == []
-    operation_id, status, exit_code, details = recorder.updates[-1]
-    assert (operation_id, status, exit_code) == ("op-short", FAILED, -15)
-    assert "stopped before start" in details
-
-
-def test_request_fetched_after_stop_records_failed(harness):
+def test_stop_stops_the_checks_and_the_replays(harness):
     harness.worker.stop()
 
-    harness.worker.on_replay("short", harness.lanes["short"], REQ_SHORT.to_body())
-
-    assert harness.lanes["short"].handled == []
-    assert harness.lanes["short"].recorder.updates == [
-        (
-            "op-short",
-            FAILED,
-            None,
-            "the operator worker stopped before the replay started",
-        )
-    ]
-
-
-def test_stop_calls_terminate_on_every_lane_runner(harness):
-    harness.worker.stop()
-
-    assert [lane.runner.terminated for lane in harness.lanes.values()] == [1, 1]
+    assert harness.worker.checks.should_stop
+    assert harness.replays.should_stop
 
 
 def test_no_request_is_taken_after_stop(harness):
@@ -463,7 +352,7 @@ def test_no_request_is_taken_after_stop(harness):
 
     harness.worker.run()
 
-    assert harness.lanes["short"].handled == []
+    assert harness.handler.requests == []
     assert harness.queue_size(replay_queue_name(harness.service, "short")) == 1
 
 
@@ -513,14 +402,16 @@ def test_cli_settings_defaults(monkeypatch):
     assert OperatorSettings(service="odata").replay_retry == 3
 
 
-def test_cli_gives_the_replay_retry_to_both_lanes(monkeypatch, fake_opensearch):
+def test_cli_wires_the_collector_handler_and_the_lanes(monkeypatch, fake_opensearch):
     for name in ENVIRONMENT:
         monkeypatch.delenv(name, raising=False)
     module = "maas_collector.rawdata.cli.operator_worker"
 
-    with patch(f"{module}.OperatorWorker") as worker_class, patch(
-        f"{module}.signal.signal"
-    ), patch(f"{module}.es_connections") as connections:
+    with patch(f"{module}.ReplayWorker") as worker_class, patch(
+        f"{module}.OperatorWorker"
+    ), patch(f"{module}.signal.signal"), patch(
+        f"{module}.es_connections"
+    ) as connections:
         connections.get_connection.return_value = fake_opensearch
         operator_worker_main(
             [
@@ -532,11 +423,33 @@ def test_cli_gives_the_replay_retry_to_both_lanes(monkeypatch, fake_opensearch):
                 "memory://",
                 "--operator-replay-retry",
                 "5",
+                "--operator-healthcheck-port",
+                "19000",
+                "--operator-short-timeout",
+                "60",
+                "--operator-long-timeout-per-day",
+                "20",
             ]
         )
 
-    lanes = worker_class.call_args.args[2]
-    assert {name: lane.replay_retry for name, lane in lanes.items()} == {
-        "short": 5,
-        "long": 5,
-    }
+    _connect, _recorder, handler, lanes, _exchange, _workdir = (
+        worker_class.call_args.args
+    )
+    assert (handler.replay_retry, handler.healthcheck_port, handler.service) == (
+        5,
+        19000,
+        "odata",
+    )
+    assert handler.lanes == ("short", "long")
+    assert [(lane.name, lane.queue, lane.routing_key) for lane in lanes] == [
+        (
+            "short",
+            "maas-operator-odata-replay-short",
+            "maas.operator.odata.replay.short",
+        ),
+        ("long", "maas-operator-odata-replay-long", "maas.operator.odata.replay.long"),
+    ]
+    assert [(lane.timeout.base, lane.timeout.per_day) for lane in lanes] == [
+        (60, 0),
+        (60, 20),
+    ]

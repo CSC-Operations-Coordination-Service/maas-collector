@@ -17,6 +17,18 @@ The worker serves three queues of its service at once, each in its own thread: t
 `short` and `long` replay lanes, and the checks. A long replay never delays a short
 one, and checks are answered while replays run.
 
+**The replays are run by maas-engine.** The lanes are the generic replay worker of
+`maas_engine.replay` (poll, acknowledge on receipt, child process under a deadline,
+operation record: see its `docs/replay.md`), and what is specific to the collector is
+`maas_collector.rawdata.operator.handler.CollectorReplayHandler`: it finds the
+interface in the configuration index, copies the configuration of the service into a
+folder of its own, and builds the collector command. The check thread stays here, being
+about odata products. The operator worker needs maas-engine:
+
+```
+pip install "maas-collector[operator]"
+```
+
 ## Options
 
 The worker takes the [common options](common_options.md) of the collectors, for the

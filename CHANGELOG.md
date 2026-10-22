@@ -1,5 +1,22 @@
 # Changelog
 
+## Version 3.13.0 (continued)
+
+### Operator worker
+
+- The replays of the operator worker run on the replay worker of maas-engine
+  (`maas_engine.replay`, maas-engine 3.2.0): the queue polling, the child process with
+  its deadline, and the operation record are no longer a copy kept here. What stays is
+  specific to the collector: `rawdata/operator/handler.py` (the interface lookup in
+  the configuration index, the copy of the configuration, the command and the
+  environment of the child), and the product check. The operator worker now needs
+  maas-engine: `pip install "maas-collector[operator]"`. Its options, queues, messages
+  and records are unchanged.
+- A child that ignores the termination asked at a stop is killed after 10 s as before,
+  but no longer up to 30 s late: that was the progress interval.
+- `maas_collector.rawdata.operator.records` and the `ChildRunner` and `ReplayLane` of
+  `operator.replay` are gone, replaced by `maas_engine.replay`'s.
+
 ## Version 3.13.0
 
 ### Replay
