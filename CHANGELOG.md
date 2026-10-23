@@ -5,7 +5,7 @@
 ### Operator worker
 
 - The replays of the operator worker run on the replay worker of maas-engine
-  (`maas_engine.replay`, maas-engine 3.2.0): the queue polling, the child process with
+  (`maas_engine.replay`, maas-engine after 3.1.0): the queue polling, the child process with
   its deadline, and the operation record are no longer a copy kept here. What stays is
   specific to the collector: `rawdata/operator/handler.py` (the interface lookup in
   the configuration index, the copy of the configuration, the command and the
