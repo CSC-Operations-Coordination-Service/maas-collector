@@ -1,6 +1,6 @@
 # Changelog
 
-## Version 3.13.0 (continued)
+## Version 3.13.0
 
 ### Operator worker
 
@@ -16,8 +16,6 @@
   but no longer up to 30 s late: that was the progress interval.
 - `maas_collector.rawdata.operator.records` and the `ChildRunner` and `ReplayLane` of
   `operator.replay` are gone, replaced by `maas_engine.replay`'s.
-
-## Version 3.13.0
 
 ### Replay
 
