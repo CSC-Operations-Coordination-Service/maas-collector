@@ -155,6 +155,10 @@ class HttpCollector(FileCollector, HttpMixin):
 
         Args:
             replay_args (ReplayArgs): replay options
+
+        Raises:
+            ValueError: an interface is disabled or unknown, before anything is
+                collected; it is listed in ``replay_failures``
         """
         # disable loop
         self.args.watch_period = 0
@@ -164,13 +168,21 @@ class HttpCollector(FileCollector, HttpMixin):
         # check the existence of the interfaces in the arguments and break if they are
         # not all defined
         for interface_name in replay_args.interface_name:
-            config = self.get_configuration_by_interface_name(interface_name)
+            try:
+                if interface_name in self.disabled_interface_names:
+                    raise ValueError(f"Interface {interface_name} is disabled")
 
-            if not config:
-                raise ValueError(
-                    f"Interface {interface_name} does not exists. "
-                    f"Available interfaces: {self.get_interface_names()}"
-                )
+                config = self.get_configuration_by_interface_name(interface_name)
+
+                if not config:
+                    raise ValueError(
+                        f"Interface {interface_name} does not exists. "
+                        f"Available interfaces: {self.get_interface_names()}"
+                    )
+            except ValueError:
+                # loop_body only logs the error: the cli exits 1 on replay_failures
+                self.replay_failures.append(interface_name)
+                raise
 
             configs.append(config)
 
@@ -245,6 +257,7 @@ class HttpCollector(FileCollector, HttpMixin):
                     replay_args.end_date_arg,
                 )
             else:
+                self.replay_failures.append(config.interface_name)
                 self.logger.error(
                     "Failed replay for %s between %s and %s",
                     config.interface_name,

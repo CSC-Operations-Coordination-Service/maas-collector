@@ -19,8 +19,43 @@ from maas_collector.rawdata.collector.filecollector import (
 from maas_collector.rawdata.collector.journal import (
     CollectingInProgressError,
     CollectorJournal,
+    CollectorReplayJournal,
     NoRefreshException,
 )
+from maas_collector.rawdata.replay import ReplayArgs
+
+JQL_DATE_FORMAT = "%Y-%m-%d %H:%M"
+
+
+def jql_for(config, journal) -> str:
+    """Build the JQL of a collect from the interface template and its journal
+
+    The template holds an ``updated > {date_criteria}`` clause. A live collect
+    starts at the journal last date, or 30 days ago. A replay collects the window
+    of its journal, resuming at the journal last date when it is more recent than
+    the window start, by closing the clause with the window end.
+
+    Args:
+        config: jira configuration, with its ``jql_query`` template
+        journal: live or replay journal of the collect
+
+    Returns:
+        str: the JQL query
+    """
+    if journal.is_a_replay_journal:
+        start_date = journal.start_date
+        if journal.last_date and journal.last_date > start_date:
+            start_date = journal.last_date
+        date_criteria = (
+            f'"{start_date.strftime(JQL_DATE_FORMAT)}" AND '
+            f'updated <= "{journal.end_date.strftime(JQL_DATE_FORMAT)}"'
+        )
+    elif journal.last_date:
+        date_criteria = f'"{journal.last_date.strftime(JQL_DATE_FORMAT)}"'
+    else:
+        date_criteria = "-30d"
+
+    return config.jql_query.format(date_criteria=date_criteria)
 
 
 # Désactive la génération automatique de __repr__ pour pouvoir utiliser
@@ -86,6 +121,10 @@ class JIRAExtendedCollector(FileCollector):
 
     def ingest(self, path=None, configs=None, force_update=None):
         """Ingest from JIRA. All arguments are ignored so defaults to None"""
+        if self.args.replay:
+            self.ingest_replay(self.args.replay)
+            return
+
         # iterate over all JIRA collector configurations
         for config in self.configs:
             self.logger.info("On going for %s", config.interface_name)
@@ -121,6 +160,93 @@ class JIRAExtendedCollector(FileCollector):
                 )
             finally:
                 # flush messages between interfaces as they don't ingest the same data
+                self._flush_message_groups()
+
+            if self.should_stop_loop:
+                break
+
+    def ingest_replay(self, replay_args: ReplayArgs):
+        """Re-run the collect of interfaces over a window
+
+        One attempt per interface: a failing interface is listed in
+        ``replay_failures`` and the next ones are still replayed.
+
+        Args:
+            replay_args (ReplayArgs): replay options
+
+        Raises:
+            ValueError: an interface is disabled, unknown or without end_point,
+                before anything is collected; it is listed in ``replay_failures``
+        """
+        # disable loop: a replay runs once
+        self.args.watch_period = 0
+
+        configs = []
+
+        # all interfaces must be replayable before collecting anything
+        for interface_name in replay_args.interface_name:
+            try:
+                if interface_name in self.disabled_interface_names:
+                    raise ValueError(f"Interface {interface_name} is disabled")
+
+                config = self.get_configuration_by_interface_name(interface_name)
+
+                if not config:
+                    raise ValueError(
+                        f"Interface {interface_name} does not exists. "
+                        f"Available interfaces: {self.get_interface_names()}"
+                    )
+
+                if not config.end_point:
+                    raise ValueError(
+                        f"Interface {interface_name} has no end_point "
+                        "and cannot be replayed"
+                    )
+            except ValueError:
+                # loop_body only logs the error: the cli exits 1 on replay_failures
+                self.replay_failures.append(interface_name)
+                raise
+
+            configs.append(config)
+
+        for config in configs:
+            self.logger.info(
+                "Start replay for %s between %s and %s",
+                config.interface_name,
+                replay_args.start_date_arg,
+                replay_args.end_date_arg,
+            )
+
+            try:
+                with CollectorReplayJournal(
+                    config,
+                    replay_args.start_date,
+                    replay_args.end_date,
+                    replay_args.suffix,
+                ) as journal:
+                    self._healthcheck.tick()
+
+                    self.ingest_tickets(config, journal)
+
+                    journal.complete()
+
+                self.logger.info(
+                    "Completed replay for %s between %s and %s",
+                    config.interface_name,
+                    replay_args.start_date_arg,
+                    replay_args.end_date_arg,
+                )
+            # a failing interface does not skip the next ones
+            # pylint: disable=W0703
+            except Exception:
+                self.replay_failures.append(config.interface_name)
+                self.logger.exception(
+                    "Failed replay for %s between %s and %s",
+                    config.interface_name,
+                    replay_args.start_date_arg,
+                    replay_args.end_date_arg,
+                )
+            finally:
                 self._flush_message_groups()
 
             if self.should_stop_loop:
@@ -191,13 +317,7 @@ class JIRAExtendedCollector(FileCollector):
         """
         client = self.build_client(config)
 
-        # TODO handle start/stop for replay
-        if journal.last_date:
-            date_criteria = f'"{journal.last_date.strftime("%Y-%m-%d %H:%M")}"'
-        else:
-            date_criteria = "-30d"
-
-        jql_str = config.jql_query.format(date_criteria=date_criteria)
+        jql_str = jql_for(config, journal)
 
         self.logger.info("Querying %s with request: %s", config.interface_name, jql_str)
 

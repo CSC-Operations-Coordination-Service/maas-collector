@@ -52,6 +52,9 @@ from maas_collector.rawdata.meta import IngestionMeta
 # exit code of a collector that stops to restart on a new configuration: EX_TEMPFAIL
 CONFIG_CHANGED_EXIT_CODE = 75
 
+# exit code of a replay CLI when an interface exhausted its retries
+REPLAY_FAILED_EXIT_CODE = 1
+
 
 # collector classes need many attributes
 # pylint: disable=R0902
@@ -158,6 +161,9 @@ class FileCollectorConfiguration:
     exchange_name: str = ""
 
     no_probe: bool = False
+
+    # False keeps the entry in the configuration but out of every collector run
+    enabled: bool = True
 
     store_meta: list = None
 
@@ -299,6 +305,9 @@ class FileCollector(CredentialMixin):
         # collector configurations
         self.configs = []
 
+        # interfaces of the disabled entries (enabled: false), which are not in configs
+        self.disabled_interface_names: set[str] = set()
+
         # logger instance
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -313,6 +322,9 @@ class FileCollector(CredentialMixin):
 
         # path to a local error log containing the latest error report
         self.error_log = None
+
+        # interface names whose replay exhausted its retries
+        self.replay_failures: list[str] = []
 
         self.stats = CollectorStats(entities={})
 
@@ -375,11 +387,17 @@ class FileCollector(CredentialMixin):
     def load_config(self):
         """populate configuration for pattern matching and routing configuration"""
         self.configs.clear()
+        self.disabled_interface_names = set()
 
         sources = self.config_provider.load()
 
         for source in sources:
-            self.configs.extend(self.get_configs(source))
+            for config in self.get_configs(source):
+                if config.enabled:
+                    self.configs.append(config)
+                else:
+                    self.logger.info("interface %s is disabled", config.interface_name)
+                    self.disabled_interface_names.add(config.interface_name)
 
             self._messenger.load_config_dict(source.content, source.name)
 
