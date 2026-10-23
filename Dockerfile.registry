@@ -17,6 +17,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Exact version to install, e.g. "3.8.2". Provided by the pipeline.
 ARG PACKAGE_VERSION
 
+# Extras of maas-collector to install, e.g. "operator" for the image of the operator
+# worker (maas-engine's replay worker). Empty for the collectors.
+ARG PACKAGE_EXTRAS=""
+
 WORKDIR /app
 
 # No apt layer on purpose: the CI runner has no direct internet egress, so
@@ -70,7 +74,7 @@ RUN --mount=type=secret,id=pip_index_url \
     pip install --no-cache-dir --no-input \
         --index-url "$index_url" \
         --trusted-host "$index_host" \
-        "maas-collector==${PACKAGE_VERSION}"
+        "maas-collector${PACKAGE_EXTRAS:+[${PACKAGE_EXTRAS}]}==${PACKAGE_VERSION}"
 
 # Run as a non-root user.
 RUN groupadd --system --gid 10001 appuser \

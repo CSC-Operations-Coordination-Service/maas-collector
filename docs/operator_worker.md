@@ -29,6 +29,13 @@ about odata products. The operator worker needs maas-engine:
 pip install "maas-collector[operator]"
 ```
 
+**The image.** The collectors' image does not have maas-engine. The operator worker runs from its own image, `maas-collector-operator`, which the CI builds from the same wheel with the build-arg `PACKAGE_EXTRAS=operator` (`Dockerfile.local` and `Dockerfile.registry`, jobs `docker-local-operator` and `docker-registry-operator` of `.github/workflows/maas-collector.yml`). Locally:
+
+```
+docker build -f Dockerfile.local --build-arg PACKAGE_EXTRAS=operator -t maas-collector-operator:dev \
+  --secret id=pip_index_url,env=PIP_INDEX_URL --secret id=netrc,src=$HOME/.netrc .
+```
+
 ## Options
 
 The worker takes the [common options](common_options.md) of the collectors, for the

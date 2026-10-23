@@ -2,6 +2,14 @@
 
 ## Version 3.13.0
 
+### Operator image
+
+- `Dockerfile.local` and `Dockerfile.registry` take a build-arg `PACKAGE_EXTRAS` (empty by
+  default), and the CI builds a second image, `maas-collector-operator`, with
+  `PACKAGE_EXTRAS=operator`: the operator worker needs maas-engine, which the collectors'
+  image does not carry. The collectors' image is unchanged. The operator image goes to the
+  Nexus Docker registry only, with no SBOM, scan or signature yet.
+
 ### Operator worker
 
 - The replays of the operator worker run on the replay worker of maas-engine

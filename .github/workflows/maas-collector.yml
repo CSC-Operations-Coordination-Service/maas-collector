@@ -144,3 +144,58 @@ jobs:
       sbom-project-version: ${{ needs.ci.outputs.version }}
       sign-image: true
     # No secrets: inherit: in openbao mode the catalog reads every value from OpenBao.
+
+  # The image of the operator worker: the same wheel with the `operator` extra, which brings
+  # maas-engine (its replay worker runs the replays, see docs/operator_worker.md). A second
+  # image and not the collectors' one: the 14 collector services keep their image without
+  # maas-engine and its dependencies. Nexus only, and no SBOM, scan or signature yet, as
+  # for the collectors' release image the tools run in the runner container, where the
+  # 127.0.0.1 registry is not the node.
+  docker-local-operator:
+    needs: ci
+    if: github.ref == 'refs/heads/develop'
+    permissions:
+      contents: read
+      id-token: write # the OIDC token the jobs log in to OpenBao with
+    uses: CSC-Operations-Coordination-Service/workflow-catalog/.github/workflows/docker-build.yml@develop
+    with:
+      runs-on: containerized # the runners on the ocs_openbao network
+      secrets-source: openbao
+      openbao-role: ci-maas-collector
+      openbao-tools: nexus
+      image-name: maas-collector-operator
+      context: .
+      dockerfile: Dockerfile.local
+      build-args: |
+        PACKAGE_EXTRAS=operator
+      artifact-name: dist
+      artifact-path: dist/
+      mount-pip-index: true
+      environment: dev
+      insecure-registry: true # plain-HTTP Nexus connector, see docker-local
+    # No secrets: inherit: in openbao mode the catalog reads every value from OpenBao.
+
+  docker-registry-operator:
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      id-token: write # the OIDC token the jobs log in to OpenBao with
+    uses: CSC-Operations-Coordination-Service/workflow-catalog/.github/workflows/docker-build.yml@develop
+    with:
+      runs-on: containerized # the runners on the ocs_openbao network
+      secrets-source: openbao
+      openbao-role: ci-maas-collector
+      openbao-tools: nexus
+      image-name: maas-collector-operator
+      context: .
+      dockerfile: Dockerfile.registry
+      build-args: |
+        PACKAGE_VERSION=${{ needs.ci.outputs.version }}
+        PACKAGE_EXTRAS=operator
+      release: true
+      mount-pip-index: true
+      environment: prod
+      insecure-registry: true # plain-HTTP Nexus connector, see docker-registry
+    # No secrets: inherit: in openbao mode the catalog reads every value from OpenBao.
+

@@ -15,6 +15,10 @@ ARG DEBIAN_VERSION=bookworm
 
 FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION} AS runtime
 
+# Extras of maas-collector to install with the wheel, e.g. "operator" for the image of the
+# operator worker (maas-engine's replay worker). Empty for the collectors.
+ARG PACKAGE_EXTRAS=""
+
 # Don't write .pyc files / buffer stdout (better container logs).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -74,11 +78,13 @@ RUN --mount=type=secret,id=pip_index_url \
         echo "ERROR: no wheel in dist/ — the 'dist' artifact is empty or holds only an sdist:" >&2; \
         ls -l /tmp/dist >&2; exit 1; \
     fi; \
-    echo "Installing: $*"; \
+    spec="$1"; \
+    if [ -n "${PACKAGE_EXTRAS:-}" ]; then spec="$1[${PACKAGE_EXTRAS}]"; fi; \
+    echo "Installing: $spec"; \
     pip install --no-cache-dir --no-input \
         --index-url "$index_url" \
         --trusted-host "$index_host" \
-        "$@"; \
+        "$spec"; \
     rm -rf /tmp/dist
 
 # Run as a non-root user.
