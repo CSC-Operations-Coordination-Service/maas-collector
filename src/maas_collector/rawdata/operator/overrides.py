@@ -51,6 +51,8 @@ _MASK = "\x00"
 _QUERY_STRING_DELIMITERS = "&#?"
 _AND = re.compile(r"\band\b", re.IGNORECASE)
 _OR = re.compile(r"\bor\b", re.IGNORECASE)
+_JQL_AND = re.compile(r"\band\b|&&", re.IGNORECASE)
+_JQL_OR_SYMBOL = "||"
 _ORDER_BY = re.compile(r"\border\s+by\b", re.IGNORECASE)
 
 
@@ -119,10 +121,10 @@ def _mask(text: str, quotes: str, backslash_escape: bool) -> str:
     return "".join(masked)
 
 
-def _split_terms(text: str, masked: str) -> List[str]:
+def _split_terms(text: str, masked: str, separator=_AND) -> List[str]:
     """Split ``text`` at the top-level ``and`` keywords, whitespace collapsed."""
     terms, start = [], 0
-    for match in _AND.finditer(masked):
+    for match in separator.finditer(masked):
         terms.append(_collapse(text[start : match.start()]))
         start = match.end()
     terms.append(_collapse(text[start:]))
@@ -192,10 +194,15 @@ def check_jql_window(jql: str) -> None:
             "a top-level or would let the query escape the replay window: "
             "put it in parentheses"
         )
+    if _JQL_OR_SYMBOL in masked:
+        raise OverrideRefused(
+            "a top-level || would let the query escape the replay window: "
+            "put it in parentheses"
+        )
     head, tail = JIRA_CLAUSE.split(" > ")
     _require_terms(
         text,
-        _split_terms(text, masked),
+        _split_terms(text, masked, _JQL_AND),
         [
             (
                 JIRA_CLAUSE,

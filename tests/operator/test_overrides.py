@@ -132,6 +132,10 @@ def test_doubled_braces_are_literal():
         "summary ~ 'a \\' OR b' AND updated > {date_criteria}",
         'updated > {date_criteria} AND status in (Closed, "TO BE VERIFIED") '
         "ORDER BY updated ASC",
+        "project = X && updated > {date_criteria} ORDER BY updated",
+        "updated > {date_criteria} && project = X",
+        'summary ~ "a || b" AND updated > {date_criteria}',
+        "(project = A || project = B) && updated > {date_criteria}",
     ],
 )
 def test_jql_windows_that_stay(jql):
@@ -148,6 +152,11 @@ def test_jql_windows_that_stay(jql):
         ("updated > {date_criteria} or project = X ORDER BY updated", r"(?i)\bor\b"),
         ('updated > {date_criteria} AND summary ~ "x', "quote"),
         ("updated > {date_criteria} AND (a = 1", "parenthes"),
+        ("updated > {date_criteria} AND project = X || project = Y", r"\|\|"),
+        ("project = X || updated > {date_criteria}", r"\|\|"),
+        ("updated > {date_criteria} || project = X ORDER BY updated", r"\|\|"),
+        ("project = X && a = 1 || updated > {date_criteria}", r"\|\|"),
+        ("project = X && a = 1", "updated"),
     ],
 )
 def test_jql_windows_that_escape(jql, word):
