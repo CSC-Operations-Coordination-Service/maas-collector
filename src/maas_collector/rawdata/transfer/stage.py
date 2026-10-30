@@ -29,6 +29,7 @@ from maas_collector.rawdata.collector.odatacollector import ODataCollectorConfig
 from maas_collector.rawdata.configuration import load_json_dict
 from maas_collector.rawdata.configprovider import ConfigSource
 from maas_collector.rawdata.configstore import ConfigStore
+from maas_collector.rawdata.transfer.amqp import take_body, transfer_connection
 from maas_collector.rawdata.transfer.backups import (
     BackupUnavailable,
     ResolvedBackup,
@@ -37,7 +38,7 @@ from maas_collector.rawdata.transfer.backups import (
     resolve_request_backup,
 )
 from maas_collector.rawdata.transfer.conflicts import open_conflict, resolve_conflict
-from maas_collector.rawdata.transfer.contract import TransferRequest
+from maas_collector.rawdata.transfer.contract import TransferRequest, transfer_queue
 from maas_collector.rawdata.transfer.download import (
     MAX_RETRY_DELAY,
     ProductDownloader,
@@ -60,6 +61,10 @@ from maas_collector.rawdata.transfer.reports import (
 from maas_collector.rawdata.transfer.rule import ArchiveRule, utc_datetime
 
 LOGGER = logging.getLogger(__name__)
+
+MAX_LOOP_SECONDS = 60
+"""``loop_body`` returns to ``run`` at least this often, for the checks of the
+configuration and of the credentials"""
 
 
 @dataclass
@@ -121,7 +126,7 @@ class TransferStage(FileCollector):
         self.sink_factory = sink_factory
         self.downloader_factory = downloader_factory
         self.report_writer = report_writer
-        self.take = take
+        self.take = take or self.take_from_queue
         self._downloaders: dict[str, ProductDownloader] = {}
 
     @property
@@ -136,6 +141,66 @@ class TransferStage(FileCollector):
         if self.args.config_backend != "opensearch":
             return None
         return ConfigStore(es_connections.get_connection(), self.args.config_store.index)
+
+    def take_from_queue(self):
+        """The body of the next request of the queue of the service, None when empty"""
+        return take_body(lambda: transfer_connection(self.args.amqp_url), self.service)
+
+    def declare_queue(self) -> None:
+        """Declare the exchange and the queue of the service, so that a request
+        published before the first one is taken is routed"""
+        with transfer_connection(self.args.amqp_url) as connection:
+            transfer_queue(self.service)(connection.default_channel).declare()
+
+    def setup(self) -> None:
+        """Load the configuration and the credentials, then declare the queue of the
+        service, before any request is awaited"""
+        super().setup()
+        self.declare_queue()
+
+    def loop_body(self, path_list) -> None:
+        """Take requests until the queue is empty, the stage stops or
+        ``MAX_LOOP_SECONDS`` have passed
+
+        A request is acknowledged when it is taken, and no connection is held while
+        it is served. A malformed body is logged and dropped. The documents a stop
+        left are published again as one request.
+        """
+        deadline = time.monotonic() + MAX_LOOP_SECONDS
+        while not self.should_stop_loop and time.monotonic() < deadline:
+            self._healthcheck.tick()
+            try:
+                body = self.take()
+            # the broker is restarting, or the network blinks: next loop
+            except Exception as error:  # pylint: disable=broad-except
+                LOGGER.warning("Cannot take a transfer request: %s", error)
+                return
+            if body is None:
+                return
+
+            try:
+                request = TransferRequest.from_body(body)
+            except ValueError as error:
+                LOGGER.error("Dropping a malformed transfer request: %s (%r)", error, body)
+                continue
+
+            left = self.handle_request(request)
+            if left:
+                self.republish(request, left)
+
+    def republish(self, request: TransferRequest, documents) -> None:
+        """Publish again the documents a stop left"""
+        again = dataclasses.replace(request, documents=tuple(documents))
+        try:
+            self.publisher.publish(again)
+        except Exception as error:  # pylint: disable=broad-except
+            LOGGER.critical(
+                "Cannot publish again the %d documents a stop left of %s: %s: %s",
+                len(documents),
+                request.interface_name,
+                error,
+                list(documents),
+            )
 
     def get_configs(self, source: ConfigSource) -> list:
         """The entries of a source, built without their extractor: the stage never

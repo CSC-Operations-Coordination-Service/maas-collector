@@ -150,6 +150,19 @@
   exits 69 (`TRANSFER_FAILED_EXIT_CODE`) fails the operation with `N documents could not
   be sent to the transfer stage`, and names the files that could not be backed up on a
   second line when there were some.
+- A new service, `python -m maas_collector.rawdata.cli.transfer --config-service
+  <service>` (`maas_collector.rawdata.transfer.stage`), archives the products of the
+  transfer requests: it reads the document, applies `duplicates`, downloads the product
+  as a stream to a `mkdtemp` directory (the token goes to the configured host only, a
+  redirect is followed without it), checks its size and checksum, uploads it to every
+  missing destination of the backup the request names at the object key
+  `<directory>/<interface>/[YYYY/MM/DD/]<name>`, and writes one archive report per
+  destination (`OK`, `REPLACED`, `SKIPPED`, `KO`). Retries are bounded
+  (`TRANSFER_MAX_ATTEMPTS`, `TRANSFER_RETRY_DELAY`, `TRANSFER_MAX_DOWNLOAD_SECONDS`).
+  Requests are acknowledged on receipt; a stop publishes the documents it left again.
+  A conflict (a product seen again with another checksum) is recorded in the index
+  `maas-archive-conflict` until a later transfer resolves it. Start one stage per
+  collector service before using an archive rule: it declares the queue of the service.
 
 ## Version 3.13.0
 
