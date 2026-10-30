@@ -3,7 +3,6 @@
 __all__ = [
     "EISPExtractor",
     "ProductExtractor",
-    "SatUnavailabilityExtractor",
     "EDRSApsExtractor",
     "AnomalyCorrelationExtractor",
     "EdrsDdpExtractor",
@@ -14,8 +13,6 @@ __all__ = [
 from .esip import ProductExtractor
 
 from .eisp import EISPExtractor
-
-from .satunavailability import SatUnavailabilityExtractor
 
 from .edrs_aps import EDRSApsExtractor
 

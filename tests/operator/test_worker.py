@@ -45,6 +45,7 @@ ENVIRONMENT = (
     "OPERATOR_WORKDIR",
     "OPERATOR_CHECK_TIMEOUT",
     "OPERATOR_REPLAY_RETRY",
+    "OPERATOR_SINGLE_LANE",
 )
 
 REQ_LONG = ReplayRequest(
@@ -375,6 +376,7 @@ def test_cli_settings_from_environment(monkeypatch):
     monkeypatch.setenv("OPERATOR_CHECK_TIMEOUT", "15")
     monkeypatch.setenv("OPERATOR_OPERATION_INDEX", "my-operation")
     monkeypatch.setenv("OPERATOR_REPLAY_RETRY", "7")
+    monkeypatch.setenv("OPERATOR_SINGLE_LANE", "true")
 
     namespace = build_parser().parse_args([])
 
@@ -389,6 +391,7 @@ def test_cli_settings_from_environment(monkeypatch):
         workdir="/work",
         check_timeout=15.0,
         replay_retry=7,
+        single_lane=True,
     )
 
 
@@ -407,9 +410,13 @@ def test_cli_wires_the_collector_handler_and_the_lanes(monkeypatch, fake_opensea
         monkeypatch.delenv(name, raising=False)
     module = "maas_collector.rawdata.cli.operator_worker"
 
-    with patch(f"{module}.ReplayWorker") as worker_class, patch(
+    with patch(f"{module}.OperatorReplayWorker") as worker_class, patch(
         f"{module}.OperatorWorker"
-    ), patch(f"{module}.signal.signal"), patch(
+    ), patch(f"{module}.ProductChecker") as checker_class, patch(
+        f"{module}.build_credential_provider", side_effect=lambda _args: object()
+    ), patch(
+        f"{module}.signal.signal"
+    ), patch(
         f"{module}.es_connections"
     ) as connections:
         connections.get_connection.return_value = fake_opensearch
@@ -435,6 +442,9 @@ def test_cli_wires_the_collector_handler_and_the_lanes(monkeypatch, fake_opensea
     _connect, _recorder, handler, lanes, _exchange, _workdir = (
         worker_class.call_args.args
     )
+    # its own provider: a load rewrites `unreadable`, which the checker reads
+    assert handler.credential_provider is not checker_class.call_args.args[2]
+    assert handler.credential_provider is not None
     assert (handler.replay_retry, handler.healthcheck_port, handler.service) == (
         5,
         19000,
@@ -448,8 +458,98 @@ def test_cli_wires_the_collector_handler_and_the_lanes(monkeypatch, fake_opensea
             "maas.operator.odata.replay.short",
         ),
         ("long", "maas-operator-odata-replay-long", "maas.operator.odata.replay.long"),
+        (
+            "custom-short",
+            "maas-operator-odata-replay-custom-short",
+            "maas.operator.odata.replay-custom.short",
+        ),
+        (
+            "custom-long",
+            "maas-operator-odata-replay-custom-long",
+            "maas.operator.odata.replay-custom.long",
+        ),
     ]
     assert [(lane.timeout.base, lane.timeout.per_day) for lane in lanes] == [
         (60, 0),
         (60, 20),
+        (60, 0),
+        (60, 20),
     ]
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("false", False),
+        ("0", False),
+        ("", False),
+    ],
+)
+def test_the_single_lane_setting_is_read_from_the_environment(
+    monkeypatch, value, expected
+):
+    monkeypatch.setenv("OPERATOR_SINGLE_LANE", value)
+    namespace = build_parser().parse_args(["--config-service", "svc"])
+    assert build_settings(namespace).single_lane is expected
+
+
+def test_the_single_lane_setting_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("OPERATOR_SINGLE_LANE", raising=False)
+    namespace = build_parser().parse_args(["--config-service", "svc"])
+    assert build_settings(namespace).single_lane is False
+
+
+def test_a_mistyped_single_lane_value_stops_the_worker(monkeypatch):
+    monkeypatch.setenv("OPERATOR_SINGLE_LANE", "ture")
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--config-service", "svc"])
+
+
+def test_cli_single_lane_wiring(monkeypatch, fake_opensearch):
+    for name in ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    module = "maas_collector.rawdata.cli.operator_worker"
+
+    with patch(f"{module}.OperatorReplayWorker") as worker_class, patch(
+        f"{module}.OperatorWorker"
+    ), patch(f"{module}.signal.signal"), patch(
+        f"{module}.es_connections"
+    ) as connections:
+        connections.get_connection.return_value = fake_opensearch
+        operator_worker_main(
+            [
+                "--config-service",
+                "odata",
+                "--es-url",
+                "http://localhost:9200",
+                "--amqp-url",
+                "memory://",
+                "--operator-single-lane",
+                "true",
+                "--operator-short-timeout",
+                "60",
+                "--operator-long-timeout-per-day",
+                "20",
+            ]
+        )
+
+    _connect, _recorder, handler, lanes, _exchange, _workdir = (
+        worker_class.call_args.args
+    )
+    assert handler.lanes == ("single",)
+    assert [(lane.name, lane.queue, lane.routing_key) for lane in lanes] == [
+        (
+            "single",
+            "maas-operator-odata-replay-single",
+            "maas.operator.odata.replay.short",
+        )
+    ]
+    assert lanes[0].extra_routing_keys == (
+        "maas.operator.odata.replay.long",
+        "maas.operator.odata.replay-custom.short",
+        "maas.operator.odata.replay-custom.long",
+    )
+    assert (lanes[0].timeout.base, lanes[0].timeout.per_day) == (60, 20)

@@ -1,12 +1,15 @@
 """Data file collector 天気はいいです"""
 
 from collections.abc import Iterable
+import copy
 import dataclasses
 import datetime
 import fnmatch
 import gc
+import itertools
 import logging
 import os
+import re
 import signal
 import time
 import traceback
@@ -18,7 +21,13 @@ from urllib.parse import urlparse
 from functools import cached_property
 
 from maas_collector.backup import instanciate_collector_backup
+from maas_collector.backup.backup import OK
 from maas_collector.backup.backup import CollectorBackupConfiguration
+from maas_collector.backup.named import (
+    SECRET_FIELDS,
+    apply_named_backup,
+    backup_definitions,
+)
 from opensearchpy.helpers import parallel_bulk
 from opensearchpy.connection.connections import connections as es_connections
 
@@ -54,6 +63,33 @@ CONFIG_CHANGED_EXIT_CODE = 75
 
 # exit code of a replay CLI when an interface exhausted its retries
 REPLAY_FAILED_EXIT_CODE = 1
+
+# exit code of a replay CLI when files could not be backed up: distinct from
+# REPLAY_FAILED_EXIT_CODE and from CONFIG_CHANGED_EXIT_CODE
+BACKUP_FAILED_EXIT_CODE = 74
+
+# last line of a replay CLI that exits with BACKUP_FAILED_EXIT_CODE, which the
+# operator worker parses to tell the operator what could not be backed up
+BACKUP_FAILURE_FORMAT = "backup failed: {count} files to {backup}"
+
+BACKUP_FAILURE_LINE = re.compile(
+    r"backup failed: (?P<count>\d+) files to (?P<backup>.+)"
+)
+
+# exit code of a replay CLI when transfer requests of the archive could not be sent:
+# the first code from 69 (EX_UNAVAILABLE) up that is none of the other three
+TRANSFER_FAILED_EXIT_CODE = next(
+    code
+    for code in itertools.count(69)
+    if code
+    not in (CONFIG_CHANGED_EXIT_CODE, REPLAY_FAILED_EXIT_CODE, BACKUP_FAILED_EXIT_CODE)
+)
+
+# last line of a replay CLI that has transfer failures, which the operator worker
+# parses to tell the operator how many documents were not requested
+TRANSFER_FAILURE_FORMAT = "transfer requests failed: {count} documents"
+
+TRANSFER_FAILURE_LINE = re.compile(r"transfer requests failed: (?P<count>\d+) documents")
 
 
 # collector classes need many attributes
@@ -177,6 +213,22 @@ class FileCollectorConfiguration:
     loudly instead of quietly bypassing resolution.
     """
 
+    backup_name: str = dataclasses.field(default="", init=False)
+    """name of the named backup `backup` was resolved from, empty for an inline block.
+
+    Resolved by load_config, never read from the JSON.
+    """
+
+    backup_credentials_entry: str = dataclasses.field(default="", init=False)
+    """name of the credential entry holding the S3 keys of the backup, empty when
+    there is none. Resolved by load_config, never read from the JSON."""
+
+    backup_credentials: dict = dataclasses.field(
+        default_factory=dict, init=False, metadata={"sensitive": True}
+    )
+    """S3 keys of the backup, copied from the credential entry by CredentialMixin.
+    Kept out of `backup` so that the block can be logged; masked in the repr."""
+
     @cached_property
     def name(self) -> str:
         """get the document class name, useful for logs"""
@@ -299,6 +351,9 @@ class FileCollector(CredentialMixin):
 
     LOOP_PRECISION_FACTOR = 10
 
+    # publisher of the transfer requests of the archive, built on first use
+    _transfer_requester = None
+
     def __init__(self, args: CollectorArgs):
         self.args = args
 
@@ -325,6 +380,12 @@ class FileCollector(CredentialMixin):
 
         # interface names whose replay exhausted its retries
         self.replay_failures: list[str] = []
+
+        # backup label -> files that could not be backed up, in replay mode only
+        self.backup_failures: dict[str, int] = {}
+
+        # publisher of the transfer requests of the archive, built on first use
+        self._transfer_requester = None
 
         self.stats = CollectorStats(entities={})
 
@@ -367,6 +428,40 @@ class FileCollector(CredentialMixin):
         # True while the configuration checks fail, to log one traceback per outage
         self._config_check_failing = False
 
+    @property
+    def transfer_service(self) -> str:
+        """service the transfer requests are published for: the one whose
+        configuration the collector loads, empty without one"""
+        config_store = self.args.config_store
+        return (config_store.service if config_store else "") or ""
+
+    @property
+    def transfer_requester(self):
+        """publisher of the transfer requests, built on first use. The archive code
+        is imported here, so that a collector without any archive rule never loads
+        it."""
+        if self._transfer_requester is None:
+            # pylint: disable=import-outside-toplevel
+            from maas_collector.rawdata.transfer.amqp import (
+                TransferPublisher,
+                transfer_connection,
+            )
+            from maas_collector.rawdata.transfer.requester import TransferRequester
+
+            self._transfer_requester = TransferRequester(
+                TransferPublisher(lambda: transfer_connection(self.args.amqp_url)),
+                self.transfer_service,
+                self.args.replay,
+            )
+        return self._transfer_requester
+
+    @property
+    def transfer_failures(self) -> int:
+        """documents whose transfer request was not sent, in replay mode"""
+        if self._transfer_requester is None:
+            return 0
+        return self._transfer_requester.failures
+
     @cached_property
     def config_provider(self) -> ConfigProvider:
         """where the configuration is read from"""
@@ -391,8 +486,12 @@ class FileCollector(CredentialMixin):
 
         sources = self.config_provider.load()
 
+        built = []
+
         for source in sources:
             for config in self.get_configs(source):
+                built.append(config)
+
                 if config.enabled:
                     self.configs.append(config)
                 else:
@@ -400,6 +499,25 @@ class FileCollector(CredentialMixin):
                     self.disabled_interface_names.add(config.interface_name)
 
             self._messenger.load_config_dict(source.content, source.name)
+
+        # resolve the backup names of every entry, enabled or not, before the report
+        # models below read the resolved blocks
+        definitions = backup_definitions(source.content for source in sources)
+
+        for config in built:
+            apply_named_backup(config, definitions)
+
+        archived = [
+            config.interface_name
+            for config in self.configs
+            if getattr(config, "archive_rule", None) is not None
+        ]
+
+        if archived and not self.transfer_service:
+            raise ValueError(
+                f"archive rules of {', '.join(sorted(archived))} need the collector's"
+                " service: set CONFIG_SERVICE or --config-service"
+            )
 
         self.config_sources = sources
         self._config_fingerprint = self.config_provider.fingerprint(sources)
@@ -653,6 +771,11 @@ class FileCollector(CredentialMixin):
         )
 
         self.action_iterator_errors = []
+
+        # documents the archive is asked to transfer
+        archive_rule = getattr(config, "archive_rule", None)
+        indexed = []
+
         try:
             # feed parallel_bulk with action iterator
             for success, info in parallel_bulk(
@@ -680,6 +803,8 @@ class FileCollector(CredentialMixin):
                     )
 
                     self._messenger.handle_message(config, document_id, index)
+                    if archive_rule is not None:
+                        indexed.append((document_id, index))
                     if iter_callback:
                         self._action_iterator.execute_callback(
                             info["index"]["_index"], info["index"]["_id"]
@@ -693,6 +818,9 @@ class FileCollector(CredentialMixin):
                     )
 
                     self._messenger.handle_message(config, document_id, index)
+
+                    if archive_rule is not None:
+                        indexed.append((document_id, index))
 
                     if iter_callback:
                         self._action_iterator.execute_callback(
@@ -715,6 +843,13 @@ class FileCollector(CredentialMixin):
                 for document_id in self._action_iterator.unmodified_ids:
                     self._messenger.handle_message(config, document_id)
 
+            if archive_rule is not None:
+                # the transfer path only: the unchanged documents of a replay are
+                # requested here, never sent again as product messages
+                self.transfer_requester.documents_indexed(
+                    config, indexed, self._action_iterator.unmodified_documents
+                )
+
             if self._action_iterator.document_count == 0:
                 self.logger.info("No data published to database from %s", path)
             else:
@@ -730,6 +865,70 @@ class FileCollector(CredentialMixin):
 
             self.action_iterator_errors = self._action_iterator.action_iterator_errors
             self._action_iterator = None
+
+    def is_incomplete(self, batch: list) -> bool:
+        """True when the reports of one file show it was not backed up, with an OK
+        report, to every destination of the backup
+
+        Args:
+            batch (list[BackupReport]): reports of the file
+        """
+        return len(batch) != len(self._backup.destinations) or any(
+            report.status != OK for report in batch
+        )
+
+    def count_backup_failure(self, config) -> None:
+        """count a file that could not be backed up, under the name of its backup
+
+        Args:
+            config (FileCollectorConfiguration): ingestion config
+        """
+        label = config.backup_name or "(inline)"
+
+        self.backup_failures[label] = self.backup_failures.get(label, 0) + 1
+
+    def backup_failure_line(self) -> str:
+        """the last line of a replay that exits with BACKUP_FAILED_EXIT_CODE
+
+        Returns:
+            str: BACKUP_FAILURE_FORMAT with the number of files and the sorted names
+                of the backups
+        """
+        return BACKUP_FAILURE_FORMAT.format(
+            count=sum(self.backup_failures.values()),
+            backup=", ".join(sorted(self.backup_failures)),
+        )
+
+    def build_backup_block(self, config) -> dict:
+        """the block of the backup object: a copy of the backup of the configuration
+        with the name of the backup and the S3 keys of its credential entry
+
+        Args:
+            config (FileCollectorConfiguration): ingestion config
+
+        Raises:
+            ValueError: the backup names a credential entry and either key is
+                missing, so that an upload never falls back on the ambient
+                credentials of the container
+
+        Returns:
+            dict: the block, for instanciate_collector_backup
+        """
+        block = copy.deepcopy(config.backup)
+
+        block["backup_name"] = config.backup_name
+
+        block.update(config.backup_credentials)
+
+        if config.backup_credentials_entry:
+            for field in SECRET_FIELDS:
+                if not block.get(field):
+                    raise ValueError(
+                        f"credential entry {config.backup_credentials_entry} of"
+                        f" backup {config.backup_name or '(inline)'} has no {field}"
+                    )
+
+        return block
 
     def backup_and_report(
         self, config, path: str, report_name: str = "", report_folder: str = ""
@@ -749,23 +948,34 @@ class FileCollector(CredentialMixin):
         """
         reports = []
 
-        try:
-            self._backup = instanciate_collector_backup(config.backup)
+        # the file, or its sidecar, was not backed up to every destination
+        failed = False
 
-            reports.extend(self._backup.backup_file(config, path))
+        try:
+            self._backup = instanciate_collector_backup(self.build_backup_block(config))
+
+            batch = self._backup.backup_file(config, path)
+            reports.extend(batch)
+            failed = self.is_incomplete(batch)
 
             # handle meta
             if IngestionMeta.has_meta_file(path):
-                reports.extend(
-                    self._backup.backup_file(config, IngestionMeta.get_meta_path(path))
+                batch = self._backup.backup_file(
+                    config, IngestionMeta.get_meta_path(path)
                 )
+                reports.extend(batch)
+                failed = failed or self.is_incomplete(batch)
 
         # catch broad exception to not break the ingestion loop
         # pylint: disable=W0703
         except Exception as error:
+            failed = True
             self.logger.error("Cannot backup %s", path)
             self.logger.exception(error)
         # pylint: enable=W0703
+
+        if failed and self.args.replay:
+            self.count_backup_failure(config)
 
         if not reports or config.backup_report_model is None:
             return
@@ -918,6 +1128,10 @@ class FileCollector(CredentialMixin):
                 # pick up rotated credentials. Not in on_loop_start so overrides
                 # cannot skip it
                 self.refresh_credentials()
+
+                # publish again the transfer requests the broker refused
+                if self._transfer_requester is not None:
+                    self._transfer_requester.retry_pending()
 
                 # restart on a new configuration, between two loops. Not in
                 # on_loop_start so overrides cannot skip it
@@ -1145,6 +1359,9 @@ class FileCollector(CredentialMixin):
 
         if self._backup:
             callables.append(self._backup.close)
+
+        if self._transfer_requester is not None:
+            callables.append(self._transfer_requester.close)
 
         for post_loop_callable in callables:
             try:

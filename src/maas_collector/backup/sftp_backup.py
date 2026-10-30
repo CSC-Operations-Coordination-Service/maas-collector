@@ -86,17 +86,20 @@ class CollectorBackupSFTP(CollectorBackup):
 
             self._created_directories.append(subdir)
 
-    def backup_file_implementation(self, config, path) -> List[BackupReport]:
+    def backup_file_implementation(
+        self, config, path, key: str = None
+    ) -> List[BackupReport]:
         """Copy file to backup space
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): explicit key, see CollectorBackup.backup_file
 
         Returns:
             list[BackupReport]: a single report
         """
-        target_dir, target_path = self.get_backup_path(config, path)
+        target_dir, target_path = self.get_backup_path(config, path, key=key)
 
         target = "/".join([target_dir, target_path])
 

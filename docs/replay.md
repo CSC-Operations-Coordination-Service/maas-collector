@@ -57,6 +57,24 @@ when at least one interface exhausted its retries (`Failed replay for ...` is lo
 or when the replay is refused before collecting anything: an interface disabled,
 unknown, or a jira one without `end_point` (the error is logged).
 
+It exits with status 74 when files could not be backed up: a file whose backup did
+not end with an `OK` report for every destination (the "Cannot backup" path
+included) is counted, the replay collects everything it can, then exits and prints,
+as its last line, `backup failed: <count> files to <backup name>` (the names of the
+backups, sorted, when there are several; `(inline)` for a backup block that has no
+name). A live collector is not concerned: it logs the failed backups and goes on.
+
+It exits with status 69 when the transfer requests of an [archive](archive) rule could
+not be sent for some documents (the request or its `REQUESTED` reports could not be
+published or stored): the replay collects everything it can, then prints, as its last
+line, `transfer requests failed: <count> documents`.
+
+When several things failed, every line is printed, the backup line first and the
+transfer line last, and one status is returned: 1 when an interface exhausted its
+retries or was refused, else 69 for the transfer requests, else 74 for the backups. A
+product whose request was never sent is missing from the archive, which is why it
+wins over a failed backup.
+
 ## Error messages
 
 ### Unknown interface

@@ -11,7 +11,7 @@ import socket
 import sys
 
 import kombu
-from maas_engine.replay import Lane, LaneTimeout, OperationRecorder, ReplayWorker
+from maas_engine.replay import OperationRecorder
 from opensearchpy.connection.connections import connections as es_connections
 
 import maas_collector.rawdata.cli.lib.log as maas_log
@@ -26,13 +26,13 @@ from maas_collector.rawdata.collector.credentialprovider import (
 from maas_collector.rawdata.collector.filecollector import CollectorArgs
 from maas_collector.rawdata.configstore import ConfigStore
 from maas_collector.rawdata.operator.check import ProductChecker
-from maas_collector.rawdata.operator.contract import (
-    LANES,
-    exchange,
-    replay_queue_name,
-    replay_routing_key,
-)
+from maas_collector.rawdata.operator.contract import LANES, exchange
 from maas_collector.rawdata.operator.handler import CollectorReplayHandler
+from maas_collector.rawdata.operator.lanes import (
+    SINGLE_LANE,
+    OperatorReplayWorker,
+    build_lanes,
+)
 from maas_collector.rawdata.operator.worker import (
     CheckWorker,
     OperatorSettings,
@@ -41,6 +41,21 @@ from maas_collector.rawdata.operator.worker import (
 
 # seconds between two AMQP heartbeats
 AMQP_HEARTBEAT = 60
+
+
+def flag(value: str) -> bool:
+    """A true/false setting: argparse converts the string of an environment variable
+    too, where `type=bool` would make "false" true
+
+    Raises:
+        argparse.ArgumentTypeError: neither a true nor a false word
+    """
+    word = str(value).strip().lower()
+    if word in ("1", "true", "yes", "on"):
+        return True
+    if word in ("", "0", "false", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"not a true or false value: {value!r}")
 
 
 def operator_parser() -> argparse.ArgumentParser:
@@ -72,6 +87,12 @@ def operator_parser() -> argparse.ArgumentParser:
             "replay-retry",
             int,
             "retries of a failing replay, 10 s apart, before it fails",
+        ),
+        (
+            "single-lane",
+            flag,
+            "true to serve every replay request, plain and custom, on one lane that"
+            " runs one at a time",
         ),
     )
 
@@ -113,6 +134,7 @@ def build_settings(namespace: argparse.Namespace) -> OperatorSettings:
         workdir=namespace.operator_workdir,
         check_timeout=namespace.operator_check_timeout,
         replay_retry=namespace.operator_replay_retry,
+        single_lane=namespace.operator_single_lane,
     )
 
 
@@ -151,25 +173,16 @@ def operator_worker_main(argv: list[str]) -> int:
     store = ConfigStore(client, settings.config_index)
     recorder = OperationRecorder(client, settings.operation_index)
 
-    # the short lane has a fixed timeout, the long one scales with the window
-    lanes = [
-        Lane(
-            lane,
-            replay_queue_name(settings.service, lane),
-            replay_routing_key(settings.service, lane),
-            LaneTimeout(
-                base=settings.short_timeout,
-                per_day=settings.long_timeout_per_day if lane == "long" else 0,
-            ),
-        )
-        for lane in LANES
-    ]
+    lanes = build_lanes(settings)
     handler = CollectorReplayHandler(
         store,
         settings.service,
-        LANES,
+        (SINGLE_LANE,) if settings.single_lane else LANES,
         settings.healthcheck_port,
         settings.replay_retry,
+        # its own provider: the checker reads `unreadable` after each of its loads,
+        # and every load rewrites it
+        credential_provider=build_credential_provider(args),
     )
 
     checker = ProductChecker(
@@ -192,7 +205,7 @@ def operator_worker_main(argv: list[str]) -> int:
             },
         )
 
-    replays = ReplayWorker(
+    replays = OperatorReplayWorker(
         connect,
         recorder,
         handler,

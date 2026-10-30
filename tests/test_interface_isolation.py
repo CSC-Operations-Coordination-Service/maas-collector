@@ -215,6 +215,8 @@ def test_odata_cli_exits_1_when_a_replay_failed():
     with patch("maas_collector.rawdata.cli.odata.ODataCollector") as collector_class:
         collector = collector_class.return_value
         collector.replay_failures = []
+        collector.backup_failures = {}
+        collector.transfer_failures = 0
         collector.run.side_effect = lambda *_: collector.replay_failures.append("A")
 
         with pytest.raises(SystemExit) as exit_info:
@@ -226,5 +228,7 @@ def test_odata_cli_exits_1_when_a_replay_failed():
 def test_odata_cli_returns_when_no_replay_failed():
     with patch("maas_collector.rawdata.cli.odata.ODataCollector") as collector_class:
         collector_class.return_value.replay_failures = []
+        collector_class.return_value.backup_failures = {}
+        collector_class.return_value.transfer_failures = 0
 
         odata_collector_main(REPLAY_ARGV)

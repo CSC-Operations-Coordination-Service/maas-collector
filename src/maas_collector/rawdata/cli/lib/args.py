@@ -1009,6 +1009,18 @@ def replay_parser() -> ArgumentParser:
         type=int,
     )
 
+    parser.add_argument(
+        "--replay-requested-by",
+        dest="replay_requested_by",
+        help="Who asked for the replay, for the operator worker's replays "
+        "(default: %(default)s)",
+        action=EnvDefault,
+        envvar="REPLAY_REQUESTED_BY",
+        required=False,
+        default="",
+        type=str,
+    )
+
     return parser
 
 
@@ -1461,6 +1473,7 @@ def get_collector_args(classobj, namespace, **kwargs):
             namespace.replay_end_date,
             namespace.replay_suffix,
             namespace.replay_retry,
+            namespace.replay_requested_by,
         )
         if args.replay.start_date > args.replay.end_date:
             raise ValueError("Replay arguments: end date is inferior than start date !")

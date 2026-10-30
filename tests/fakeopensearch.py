@@ -4,12 +4,16 @@ In-memory stand-in for the opensearch-py client, for the configuration tests.
 It covers what the configuration provider, the configuration store and the admin
 CLI call: indices.exists / create, index (op_type=create answers 409 on an existing
 id), get, update, search with a bool query of term filters, sort and size, and the
-scroll calls of opensearchpy.helpers.scan. Searches also take a list of indices and
+scroll calls of opensearchpy.helpers.scan. A `range` query takes `gte`, `gt`, `lte` and
+`lt`, comparing ISO dates as datetimes (`Z` accepted). Searches also take a list of indices and
 an ids query, for MAASDocument.mget_by_ids. An index created with a "dynamic":
-"strict" mapping refuses unmapped top-level fields, like OpenSearch does.
+"strict" mapping refuses unmapped top-level fields, like OpenSearch does. An index
+name with a "*" in a search expands over the existing indices.
 """
 
 import copy
+import datetime
+import fnmatch
 import itertools
 
 from opensearchpy.exceptions import ConflictError, NotFoundError, RequestError
@@ -118,10 +122,18 @@ class FakeOpenSearch:
         """bool / term / terms / match_all queries, sort, size. With scroll, every
         hit comes in the first page, and scroll() ends the iteration"""
         self.check_available()
-        indices = index if isinstance(index, list) else [index]
-        for name in indices:
-            if name not in self.documents:
+        indices = []
+        for name in index if isinstance(index, list) else [index]:
+            if "*" in name:
+                # a wildcard matching no index answers no hit, like OpenSearch
+                found = [
+                    known for known in self.documents if fnmatch.fnmatch(known, name)
+                ]
+            elif name in self.documents:
+                found = [name]
+            else:
                 raise NotFoundError(404, "index_not_found_exception", name)
+            indices.extend(known for known in found if known not in indices)
         body = body or {}
         hits = [
             {"_index": name, "_id": doc_id, "_source": copy.deepcopy(source)}
@@ -177,6 +189,14 @@ def matches(source: dict, query: dict, doc_id: str = None) -> bool:
             matches(source, {"term": {field: value}}, doc_id) for value in values
         )
 
+    if "range" in query:
+        ((field, bounds),) = query["range"].items()
+        if field not in source:
+            return False
+        return all(
+            compare(source[field], operator, bound) for operator, bound in bounds.items()
+        )
+
     if "bool" in query:
         clauses = query["bool"]
 
@@ -190,6 +210,31 @@ def matches(source: dict, query: dict, doc_id: str = None) -> bool:
         ) and not any(matches(source, clause, doc_id) for clause in as_list("must_not"))
 
     raise NotImplementedError(f"FakeOpenSearch does not support the query {query}")
+
+
+def as_comparable(value):
+    """a value of a range: an ISO date as a datetime (a naive one read as UTC), else
+    the value itself"""
+    if isinstance(value, str):
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.UTC)
+    if isinstance(value, datetime.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=datetime.UTC)
+    return value
+
+
+def compare(stored, operator: str, bound) -> bool:
+    """one bound of a range query"""
+    stored, bound = as_comparable(stored), as_comparable(bound)
+    return {
+        "gte": lambda: stored >= bound,
+        "gt": lambda: stored > bound,
+        "lte": lambda: stored <= bound,
+        "lt": lambda: stored < bound,
+    }[operator]()
 
 
 def sort_hits(hits: list, sort) -> list:
@@ -230,4 +275,13 @@ def add_config_document(
             "services": services,
             "content": content,
         },
+    )
+
+
+def add_report_document(client: FakeOpenSearch, index: str, backup_name: str, **fields):
+    """write a backup report document, as a collector or the archive would"""
+    client.index(
+        index=index,
+        id=f"report-{sum(len(docs) for docs in client.documents.values()) + 1}",
+        body={"backup_name": backup_name, **fields},
     )

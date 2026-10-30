@@ -19,7 +19,14 @@
                 { "name": "duration", "type": "Float" },
                 { "name": "status", "type": "Keyword" },
                 { "name": "error_type", "type": "Keyword" },
-                { "name": "details", "type": "Text" }
+                { "name": "details", "type": "Text" },
+                { "name": "origin", "type": "Keyword" },
+                { "name": "backup_name", "type": "Keyword" },
+                { "name": "operation_id", "type": "Keyword" },
+                { "name": "product_id", "type": "Keyword" },
+                { "name": "product_name", "type": "Keyword" },
+                { "name": "written_md5", "type": "Keyword" },
+                { "name": "catalogue_checksum", "type": "Keyword" }
             ],
             "partition_field": "ingestionTime",
             "partition_format": "%Y"

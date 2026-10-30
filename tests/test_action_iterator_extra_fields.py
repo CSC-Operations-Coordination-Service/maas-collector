@@ -149,3 +149,17 @@ def test_row_is_skipped_when_the_attachment_is_unchanged():
 
     assert document is None
     assert iterator.unmodified_ids == ["PRODUCT_A"]
+
+
+def test_unchanged_document_keeps_its_stored_index():
+    iterator = build_iterator([])
+    iterator.config.model = DeletionRow
+    extract = {
+        "product_name": "PRODUCT_A",
+        "attachment_id": "10400",
+        "reportName": "OMCS-1234_LTA_Werum_DelList.csv",
+    }
+    iterator.process_document("PRODUCT_A", extract, existing_row("PRODUCT_A", "10400"))
+    assert iterator.unmodified_documents == [
+        ("PRODUCT_A", "raw-data-product-deletion-static")
+    ]

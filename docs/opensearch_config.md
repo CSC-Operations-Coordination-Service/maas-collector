@@ -22,7 +22,7 @@ per version of a configuration file**. The document id is `<path>@<version>`, li
 - `path` is the path of the file relative to the service directory of a file
   deployment: the path under `/conf/collector/` in the containers.
 - `content` is the file JSON, verbatim: `{"collectors": [...], "models": [...],
-  "amqp": {...}}`, each key optional. It is stored, not indexed.
+  "amqp": {...}, "backups": [...]}`, each key optional. It is stored, not indexed.
 - `services` lists the services that load the file. Several services may share a
   file: one document serves them all.
 - The current version of a path is flagged `latest`. Versions are never modified,
@@ -47,7 +47,20 @@ per version of a configuration file**. The document id is `<path>@<version>`, li
 
 The mapping is strict: OpenSearch refuses any other field. Only credential-free
 configuration files are accepted: a file whose top-level keys are not within
-`collectors`, `models` and `amqp`, like a credential file, is refused.
+`collectors`, `models`, `amqp` and `backups`, like a credential file, is refused.
+
+A backup is one file, `backups/<name>.json`, whose content is
+`{"backups": [definition]}` (see [backup.md](backup.md#named-backups)), tagged with
+every service that may use it. `validate_config_sources` checks the definition
+(name, type, directory, credentials entry name, no `s3_access_key` nor
+`s3_secret_key`, in a definition or in an inline `backup` block), that an
+`interface_name` has no `@`, that the `backup` of an entry is a name or a block, and
+that an entry does not use the same backup for its `backup` and its `archive` rule.
+Checking the files of a service together (`resolve_models`) also checks that every
+backup named by an entry or an archive rule is defined by one of the files, entries
+enabled or not, that no name is defined by two files, and that the `report_model` of
+a definition is a model of the service. A dangling reference raises
+`ConfigIntegrityError`, which lists one line per problem.
 
 ## Settings of the collectors
 
@@ -93,6 +106,26 @@ seconds have passed since the last check. A change is picked up within about
   period. The first failure logs a traceback, the next ones a single line.
 - With `CONFIG_REFRESH_PERIOD=0`, the collector never checks: a change applies at
   the next restart.
+
+## Validation
+
+`validate_config_sources` checks that the collectors can load a set of files. It
+has two modes:
+
+- **Evaluating** (`evaluate=True`, the default, the mode of the collectors and of the
+  administration CLI): every extractor is built, so the `python` lambdas and the
+  converters of the entries are evaluated.
+- **Static** (`evaluate=False`): nothing is evaluated. Each `python` and `rpython`
+  string, at any depth of the extractor `args` and `converter_map`, is parsed with
+  `ast.parse(..., mode="eval")` and must be a lambda without default argument; the
+  class of an extractor and the names of its arguments are checked against its
+  signature without building it
+  (`maas_collector.rawdata.extractor.static`). Lambdas are evaluated only where they
+  run, in the collectors and in the replay child.
+
+A service that must not execute what it validates, like the backend, uses
+`ConfigStore(client, index, evaluate=False)`: `publish` and `rollback` then validate
+statically.
 
 ## Administration CLI
 
@@ -153,6 +186,14 @@ python -m maas_collector.rawdata.cli.config diff odata/prip/prip-s1a.json
    yet gets version 1. A path already in the index is never overwritten: when it
    differs from the deploy tree, the import reports a `drift` and leaves it
    untouched. From then on, the index is the source of truth.
+   - The files are published in an order that keeps the references the store checks
+     (see [Backups](#backups)): first the files with neither `collectors` nor
+     `backups` (models, amqp), then the files with `backups`, then the others, each
+     group by path. A file that sorts before `backups/` does not make the import
+     refuse its entries.
+   - A report model that a backup names must be defined in a `models` file: one
+     defined inline by an entry that uses the backup cannot be imported, because the
+     entries come after the backups.
 4. Check a service: `config list --service odata`.
 5. Switch the services one at a time: set `CONFIG_BACKEND=opensearch` and
    `CONFIG_SERVICE=<service directory name>`, and remove the configuration mounts
@@ -177,6 +218,37 @@ services:
         condition: any
 ```
 
+## Backups
+
+A backup is one file, `backups/<name>.json`, tagged with every service that may use it
+(see [backup.md](backup.md#named-backups) for the definition). Each backup has its own
+versions, history and rollback.
+
+- **Extend or derive.** A new version may change the description, the report model,
+  the credentials entry and add a bucket (several buckets are mirrors: every file is
+  written to each of them). It may not change the **destination keys**: `type`,
+  `s3_endpoint_url`, `directory`, `calendar_tree`, `enable_gzip` and a removed bucket,
+  once the backup has reports. Derive a new backup under a new name instead.
+- **The guard** lives in `ConfigStore`, so the CLI and the backend share it, and
+  applies to `publish`, `rollback`, and a backup deleted then created again (it is
+  compared with what the tombstone replaced). It looks for a report naming the backup
+  in `raw-data-backup*` (`ConfigStore(..., report_index=...)`), every yearly partition
+  included, so the account of `config` and of the backend needs read access to that
+  index. A report index that cannot be read refuses the change; a missing one means no
+  reports.
+- **Reports are matched on the name alone.** A same-named backup of another service
+  that has reports also blocks a change (accepted, conservative), and a name that has
+  reports cannot be defined by another path: a backup keeps its file path.
+- **Reference integrity.** For every write (publish, rollback, delete), with the write
+  applied, no entry or archive rule of an affected service (enabled or not) may name a
+  backup the service does not load, and no backup may name a report model the service
+  does not define. The affected services are those of the new version and those of the
+  current one, so deleting a backup, untagging a service, renaming a backup and rolling
+  back to an older version or a tombstone are covered. A refusal raises
+  `ConfigIntegrityError`, with one line per problem
+  (`service odata: backups/x.json: interface ITF_A uses backup nope, which is not defined`);
+  nothing is written.
+
 ## Roles
 
 **Configurations run code**: the `{"python": "lambda ..."}` values of a
@@ -187,6 +259,10 @@ means code execution in every collector that reads it.
 - Only the administrators running the CLI get write access.
 - Check that no other role of the collector users grants write access to the index,
   for example through a `*` index pattern.
+- The account that writes (the CLI, or a service using `ConfigStore`) also needs
+  **read** access to the backup report indices, `raw-data-backup*`: the destination
+  guard of a backup reads them (see [Backups](#backups)). Without it, a change to a
+  backup destination is refused.
 
 With the OpenSearch security plugin:
 

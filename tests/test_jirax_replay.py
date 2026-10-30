@@ -200,6 +200,7 @@ def test_jirax_cli_exits_1_when_a_replay_failed():
     with patch("maas_collector.rawdata.cli.jirax.JIRAExtendedCollector") as cls:
         collector = cls.return_value
         collector.replay_failures = []
+        collector.backup_failures = {}
         collector.run.side_effect = lambda *_: collector.replay_failures.append("A")
 
         with pytest.raises(SystemExit) as exit_info:
@@ -211,4 +212,5 @@ def test_jirax_cli_exits_1_when_a_replay_failed():
 def test_jirax_cli_returns_when_no_replay_failed():
     with patch("maas_collector.rawdata.cli.jirax.JIRAExtendedCollector") as cls:
         cls.return_value.replay_failures = []
+        cls.return_value.backup_failures = {}
         jirax_collector_main(REPLAY_ARGV)
