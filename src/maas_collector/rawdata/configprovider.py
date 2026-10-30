@@ -28,6 +28,7 @@ from maas_collector.rawdata.configuration import (
     find_configurations,
 )
 from maas_collector.rawdata.messenger import parse_chunk_config
+from maas_collector.rawdata.transfer.rule import check_archive_rule
 
 LOGGER = logging.getLogger("ConfigProvider")
 
@@ -499,6 +500,7 @@ def validate_config_sources(
 
             for meta in content.get("collectors", []):
                 check_entry_backups(meta)
+                check_archive_rule(meta, config_classes_for(meta))
 
                 for configuration_class in config_classes_for(meta):
                     build_collector_configuration(

@@ -32,6 +32,8 @@ from maas_collector.rawdata.collector.http.authentication import build_authentic
 
 import maas_collector.rawdata.collector.tools.archivetools as archivetools
 
+from maas_collector.rawdata.transfer.rule import ArchiveRule
+
 
 # Désactive la génération automatique de __repr__ pour pouvoir utiliser
 # celui du parent qui masque les données sensible comme les mot de passe
@@ -115,6 +117,20 @@ class ODataCollectorConfiguration(HttpCollectorConfiguration):
     list_of_files_to_retrieve_per_query: int = 10
 
     list_of_files_to_retrieve_query: str = ""
+
+    ARCHIVABLE: typing.ClassVar[bool] = True
+    """an entry of this class may carry an archive rule"""
+
+    archive: dict = None
+    """archive rule: {"backup", "duplicates", "fields", "download"}, see archive.md"""
+
+    archive_rule: "ArchiveRule | None" = field(default=None, init=False)
+    """the parsed `archive`, set when the configuration is built"""
+
+    def __post_init__(self):
+        self.archive_rule = ArchiveRule.from_entry(
+            {"interface_name": self.interface_name, "archive": self.archive}
+        )
 
     def get_config_product_url(self):
         """Retrieve the product_url field from the collector configuration

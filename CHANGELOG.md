@@ -118,6 +118,19 @@
   block. A test fails when a field looks like a credential and nobody classified it.
   See `docs/configuration_schema.md`.
 
+### Continuous archive
+
+- An odata collector entry may declare an `archive` rule (`backup`, `duplicates`,
+  `fields`, `download`): every product indexed through it is archived once into that
+  named backup by the transfer stage. The rule is parsed when the configuration is
+  built (`ODataCollectorConfiguration.archive_rule`) and checked by the validation in
+  both modes: only odata entries can archive, and never into the entry's own `backup`.
+  See `docs/archive.md`.
+- The collectors and the transfer stage speak through transfer requests: exchange
+  `maas-transfer-exchange` (topic, durable), routing key `maas.transfer.<service>`,
+  queue `maas-transfer-<service>`, published mandatory and confirmed. The wire format is
+  in `docs/archive.md`.
+
 ## Version 3.13.0
 
 ### Operator image

@@ -20,6 +20,8 @@ maas-collector is the component that ingest data files into MAAS raw database fo
 
 - [Backup](backup)
 
+- [Continuous archive](archive)
+
 - [Vault credentials](vault)
 
 - Collector implementations
