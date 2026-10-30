@@ -82,6 +82,16 @@
 - `CollectorBackupS3Configuration` marks `s3_access_key` and `s3_secret_key` as
   sensitive and masks them in its representation.
 
+### Custom recollects
+
+- `maas_collector.rawdata.operator.overrides` holds what a custom recollect may change
+  in a collector entry: the allowlist (`odata_query_filter`, `download_file_pattern`,
+  `product_per_page` and `interface_credentials` of an odata entry; `jql_query` and
+  `interface_credentials` of a jira entry), the structural checks that keep the replay
+  window in a custom query, the archive choice (`backup`, `backup_version`,
+  `duplicates`, `force`) and `merge_overrides`. The rules are in
+  `docs/custom_recollect.md`.
+
 ## Version 3.13.0
 
 ### Operator image
