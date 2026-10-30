@@ -60,6 +60,7 @@ Its own options:
 | `--operator-workdir`              | `OPERATOR_WORKDIR`              | system temp folder      | folder of the configuration copies and check payloads      |
 | `--operator-check-timeout`        | `OPERATOR_CHECK_TIMEOUT`        | 20                      | seconds a check may wait for the interface                 |
 | `--operator-replay-retry`         | `OPERATOR_REPLAY_RETRY`         | 3                       | retries of a failing odata replay, 10 s apart              |
+| `--operator-single-lane`          | `OPERATOR_SINGLE_LANE`          | false                   | `true` for one lane that runs every replay, one at a time  |
 
 A long replay may run `max(short timeout, days of its window × long timeout per
 day)` seconds. The timeout is the one of the lane, that is of the queue the request
@@ -107,6 +108,23 @@ counts for the two objects, an empty `configuration` does not):
 ```
 
 ## Replays
+
+### Single lane
+
+With `OPERATOR_SINGLE_LANE=true` the worker has **one lane**, `single`, instead of
+`short`, `long` and the two custom lanes: one thread, one child at a time, and the queue
+`maas-operator-<service>-replay-single`, bound to the four replay keys of the service
+(`replay.short`, `replay.long`, `replay-custom.short`, `replay-custom.long`), so plain
+and custom requests share it. The lane serves custom requests (it is custom-capable),
+takes the health check port `OPERATOR_HEALTHCHECK_PORT`, and its timeout is the one of
+the long lane: `max(short timeout, days of the window × long timeout per day)`. The
+setting is generic: which service runs single-lane is a deployment choice. A value that
+is neither true nor false (`1/true/yes/on`, `0/false/no/off`, any case) stops the
+worker at start.
+
+When switching a service to this mode, **the plain `-short` and `-long` queues of an
+earlier two-lane worker stay bound and keep receiving copies of the requests: delete
+them** (and the custom queues, if the worker had them).
 
 ### Custom lanes
 

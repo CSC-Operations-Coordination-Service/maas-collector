@@ -135,7 +135,13 @@ class FakeProvider:
 
 
 def make_worker(
-    store, tmp_path, recorder, port=18081, service="odata", credential_provider=None
+    store,
+    tmp_path,
+    recorder,
+    port=18081,
+    service="odata",
+    credential_provider=None,
+    single=False,
 ):
     """the replay worker of maas-engine with the collector's handler, four lanes"""
     lanes = [
@@ -144,13 +150,17 @@ def make_worker(
         Lane("custom-short", "q-cshort", "k.cshort", LaneTimeout(base=100)),
         Lane("custom-long", "q-clong", "k.clong", LaneTimeout(base=100, per_day=50)),
     ]
+    if single:
+        lanes = [
+            Lane("single", "q-single", "k.short", LaneTimeout(base=100, per_day=50))
+        ]
     return ReplayWorker(
         lambda: None,
         recorder,
         CollectorReplayHandler(
             store,
             service,
-            ("short", "long"),
+            ("single",) if single else ("short", "long"),
             port,
             3,
             credential_provider=credential_provider,
@@ -991,3 +1001,28 @@ def test_overrides_and_archive_together(odata_store, fake_opensearch, tmp_path):
     written = runner.conf["a.json"]["collectors"][0]
     assert written["download_file_pattern"] == ["*.EOF*"]
     assert written["archive"]["backup_version"] == 2
+
+
+def test_the_single_lane_runs_plain_and_custom_requests_one_at_a_time(
+    odata_store, tmp_path
+):
+    recorder = FakeRecorder()
+    worker = make_worker(odata_store, tmp_path, recorder, single=True)
+    runner = FakeRunner()
+    worker.runners["single"] = runner
+    lane_single = worker.lanes["single"]
+    worker.handle(lane_single, req())
+    worker.handle(
+        lane_single,
+        dataclasses.replace(custom_req(configuration="x"), operation_id="op2"),
+    )
+    assert recorder.calls == [
+        ("op1", RUNNING),
+        ("op1", DONE, 0),
+        ("op2", RUNNING),
+        ("op2", DONE, 0),
+    ]
+    for command, env, _timeout in runner.commands:
+        assert command[command.index("--healthcheck-port") + 1] == "18081"
+        assert command[command.index("--replay-interface-name") + 1] == "ITF_A"
+        assert env["MAAS_INSTANCE_ID"].endswith("-replay-single")

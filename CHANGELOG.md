@@ -102,6 +102,11 @@
   health check port) of its plain lane, and a custom request on a plain lane is refused.
   The handler applies the overrides and the archive choice to the interface's entry in
   the configuration copy and validates the copy statically before it starts the child.
+- Single-lane mode: `--operator-single-lane` (`OPERATOR_SINGLE_LANE`, default false)
+  runs one lane, `single`, that takes the four replay keys of the service on one queue
+  and replays one request at a time. When switching a service to it, delete the plain
+  `-short` and `-long` queues of its earlier worker: they stay bound and keep receiving
+  copies of the requests.
 
 ## Version 3.13.0
 
