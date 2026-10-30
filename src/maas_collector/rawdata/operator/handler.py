@@ -35,7 +35,12 @@ from maas_collector.rawdata.implementation import (
 )
 from maas_collector.rawdata.operator.contract import CUSTOM_SUFFIX
 from maas_collector.rawdata.operator.lanes import accepts_custom, slot_of
-from maas_collector.rawdata.operator.overrides import OverrideRefused, merge_overrides
+from maas_collector.rawdata.operator.overrides import (
+    OverrideRefused,
+    check_archive_choice,
+    merge_overrides,
+    normalize_archive_choice,
+)
 from maas_collector.rawdata.operator.replay import (
     REPLAY_MODULES,
     ReplayNotPossible,
@@ -133,6 +138,50 @@ def entry_in_copy(service_dir: str, interface_name: str) -> tuple[str, dict, int
     return found[0]
 
 
+def _defines_for(document: dict | None, service: str, name: str) -> bool:
+    """whether a configuration document is a live definition of a backup for a service"""
+    if not document or document.get("deleted"):
+        return False
+    if service not in document.get("services", []):
+        return False
+    content = document.get("content") or {}
+    return any(
+        isinstance(definition, dict) and definition.get("name") == name
+        for definition in content.get("backups", [])
+    )
+
+
+def resolve_backup_version(
+    store: ConfigStore, service: str, name: str, version: int | None
+) -> int:
+    """The version of a backup definition a recollect archives with
+
+    Exactly one current, live file of the service defines the backup `name`. Its
+    version is the answer for `None`; a named version must still define it, for the
+    service.
+
+    Raises:
+        ReplayNotPossible: no such file, several, or a version that cannot serve
+    """
+    current = [
+        document for document in store.latest() if _defines_for(document, service, name)
+    ]
+    if not current:
+        raise ReplayNotPossible(
+            f"backup {name} is not defined by a current file of service {service}"
+        )
+    if len(current) > 1:
+        paths = ", ".join(document["path"] for document in current)
+        raise ReplayNotPossible(f"backup {name} is defined by several files: {paths}")
+    if version is None:
+        return current[0]["version"]
+    if not _defines_for(store.get(current[0]["path"], version), service, name):
+        raise ReplayNotPossible(
+            f"backup {name} has no live version {version} for service {service}"
+        )
+    return version
+
+
 @dataclass
 class Prepared:
     """what `prepare` made: the copy of the configuration and the collector to run"""
@@ -223,9 +272,17 @@ class CollectorReplayHandler:
                     f"interface_credentials: no credential entry {name} for "
                     f"service {self.service}"
                 )
-        content["collectors"][index] = merge_overrides(
-            class_name, content["collectors"][index], overrides
-        )
+        merged = merge_overrides(class_name, content["collectors"][index], overrides)
+        if part.archive is not None:
+            check_archive_choice(class_name, part.archive)
+            choice = normalize_archive_choice(part.archive)
+            choice["backup_version"] = resolve_backup_version(
+                self.store, self.service, choice["backup"], choice["backup_version"]
+            )
+            rule = merged.get("archive")
+            # the rule's fields and download stay: the choice says where, not what
+            merged["archive"] = {**(rule if isinstance(rule, dict) else {}), **choice}
+        content["collectors"][index] = merged
         with open(path, "wb") as conf_fd:
             conf_fd.write(serialize(content))
         configuration_class = get_collector_class_by_config_classname(

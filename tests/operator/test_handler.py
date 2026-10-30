@@ -110,9 +110,13 @@ class FakeRunner:
             name for name in os.listdir(conf_dir) if not name.startswith(".")
         )
         self.conf = {}
-        for name in self.conf_files:
-            with open(os.path.join(conf_dir, name), encoding="UTF-8") as conf_fd:
-                self.conf[name] = json.load(conf_fd)
+        for folder, _dirs, names in os.walk(conf_dir):
+            for name in names:
+                if name.startswith("."):
+                    continue
+                path = os.path.join(folder, name)
+                with open(path, encoding="UTF-8") as conf_fd:
+                    self.conf[os.path.relpath(path, conf_dir)] = json.load(conf_fd)
         if self.boom:
             raise self.boom
         return self.code, self.tail
@@ -277,15 +281,25 @@ def test_a_custom_request_on_a_custom_lane_runs_the_real_interface(
     assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
 
 
-@pytest.mark.parametrize(
-    "fields", [{"overrides": {}}, {"configuration": "x"}, {"archive": {}}]
-)
+@pytest.mark.parametrize("fields", [{"overrides": {}}, {"configuration": "x"}])
 def test_a_request_with_one_field_set_is_custom(odata_store, tmp_path, fields):
     runner = FakeRunner()
     replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
     replay_lane.handle(custom_req(**fields))
     assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
     assert len(runner.commands) == 1
+
+
+def test_an_empty_archive_is_set_so_the_request_is_custom_but_its_choice_is_refused(
+    odata_store, tmp_path
+):
+    """{} is set (Task 3's rule): the request is custom, then it has no backup"""
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(archive={}))
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "archive.backup" in recorder.details
+    assert runner.commands == []
 
 
 @pytest.mark.parametrize("name", ["short", "long"])
@@ -798,3 +812,182 @@ def test_a_plain_request_is_not_validated_or_changed(odata_store, tmp_path):
     replay_lane.handle(req())
     assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
     assert runner.conf == {"a.json": {"collectors": [entry()]}}
+
+
+def add_backup(
+    client, name="archive-a", version=1, services=("odata",), deleted=False, **kwargs
+):
+    """a backup definition, as `backups/<name>.json`"""
+    content = (
+        {}
+        if deleted
+        else {"backups": [{"name": name, "type": "BackupLocal", "directory": "/data"}]}
+    )
+    add_config_document(
+        client,
+        kwargs.pop("path", f"backups/{name}.json"),
+        version,
+        list(services),
+        content,
+        deleted=deleted,
+        **kwargs,
+    )
+
+
+CHOICE = {
+    "backup": "archive-a",
+    "backup_version": None,
+    "duplicates": "skip",
+    "force": False,
+}
+
+
+def archive_of(runner):
+    return runner.conf["a.json"]["collectors"][0]["archive"]
+
+
+def test_the_archive_choice_is_written_into_the_entry_with_the_backup_pinned(
+    odata_store, fake_opensearch, tmp_path
+):
+    add_backup(fake_opensearch, version=3)
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    choice = {**CHOICE, "duplicates": "replace_if_changed", "force": True}
+    replay_lane.handle(custom_req(archive=choice))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert archive_of(runner) == {
+        "backup": "archive-a",
+        "backup_version": 3,
+        "duplicates": "replace_if_changed",
+        "force": True,
+    }
+
+
+def test_an_existing_rule_keeps_its_fields_and_download(
+    store, fake_opensearch, tmp_path
+):
+    rule = {
+        "backup": "old",
+        "fields": {"checksum": "origin_checksum_md5"},
+        "download": {"url": "https://bytes.example/{id}", "quote_id": False},
+    }
+    add(fake_opensearch, "a.json", [entry(archive=rule)])
+    add_backup(fake_opensearch)
+    runner = FakeRunner()
+    replay_lane, recorder = lane(store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(archive=CHOICE))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert archive_of(runner) == {
+        "backup": "archive-a",
+        "backup_version": 1,
+        "duplicates": "skip",
+        "force": False,
+        "fields": rule["fields"],
+        "download": rule["download"],
+    }
+
+
+def test_a_named_version_is_kept_when_it_still_names_the_backup(
+    odata_store, fake_opensearch, tmp_path
+):
+    add_backup(fake_opensearch, version=1, latest=False)
+    add_backup(fake_opensearch, version=2)
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(archive={**CHOICE, "backup_version": 1}))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert archive_of(runner)["backup_version"] == 1
+
+
+def build_backup_case(client, case):
+    """the index for each way a backup cannot serve"""
+    if case == "untagged":
+        add_backup(client, services=("other",))
+    elif case == "deleted":
+        add_backup(client, version=1, latest=False)
+        add_backup(client, version=2, deleted=True)
+    elif case == "version_missing":
+        add_backup(client)
+    elif case == "version_tombstone":
+        add_backup(client, version=1, latest=False, deleted=True)
+        add_backup(client, version=2)
+    elif case == "version_untagged":
+        add_backup(client, version=1, latest=False, services=("other",))
+        add_backup(client, version=2)
+    elif case == "two_files":
+        add_backup(client)
+        add_backup(client, path="backups/copy.json")
+
+
+@pytest.mark.parametrize(
+    "case, version, word",
+    [
+        ("unknown", None, "archive-a"),
+        ("untagged", None, "service"),
+        ("deleted", None, "archive-a"),
+        ("version_missing", 9, "version 9"),
+        ("version_tombstone", 1, "version 1"),
+        ("version_untagged", 1, "version 1"),
+        ("two_files", None, "archive-a"),
+    ],
+)
+def test_a_backup_that_cannot_serve_is_refused(
+    odata_store, fake_opensearch, tmp_path, case, version, word
+):
+    build_backup_case(fake_opensearch, case)
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(archive={**CHOICE, "backup_version": version}))
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert word in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
+    assert slot_is_free(replay_lane)
+
+
+def test_an_archive_choice_on_a_jira_entry_is_refused(store, fake_opensearch, tmp_path):
+    add(
+        fake_opensearch,
+        "j.json",
+        [entry(cls="JiraExtendedCollectorConfiguration")],
+        services=("jirax",),
+    )
+    add_backup(fake_opensearch, services=("jirax",))
+    runner = FakeRunner()
+    replay_lane, recorder = lane(
+        store, runner, tmp_path, name="custom-short", service="jirax"
+    )
+    replay_lane.handle(custom_req(archive=CHOICE))
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "archive" in recorder.details
+    assert runner.commands == []
+
+
+def test_an_archive_choice_without_overrides_runs_the_live_query(
+    store, fake_opensearch, tmp_path
+):
+    live = entry(
+        odata_query_filter=WINDOW,
+        download_file_pattern=["*"],
+        product_per_page=500,
+    )
+    add(fake_opensearch, "a.json", [live])
+    add_backup(fake_opensearch)
+    runner = FakeRunner()
+    replay_lane, recorder = lane(store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(archive=CHOICE))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    written = runner.conf["a.json"]["collectors"][0]
+    assert {k: v for k, v in written.items() if k != "archive"} == live
+    assert written["archive"]["backup"] == "archive-a"
+
+
+def test_overrides_and_archive_together(odata_store, fake_opensearch, tmp_path):
+    add_backup(fake_opensearch, version=2)
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(overrides=CUSTOM, archive=CHOICE))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    written = runner.conf["a.json"]["collectors"][0]
+    assert written["download_file_pattern"] == ["*.EOF*"]
+    assert written["archive"]["backup_version"] == 2
