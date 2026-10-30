@@ -44,6 +44,11 @@ The destination path is `directory[/YYYY/MM/DD]/<interface name>/<file name>`.
 }
 ```
 
+The backup creates the folders below `directory` (`YYYY/MM/DD`, the interface name)
+but **not `directory` itself**: it must exist, as a mounted volume does. A missing
+`directory` is a `KO` report (`FileNotFoundError`), so an unmounted path does not
+silently fill the container's own disk.
+
 ## S3
 
 A single file is uploaded to **every** bucket of `buckets`.
@@ -53,7 +58,7 @@ A single file is uploaded to **every** bucket of `buckets`.
     "...": "...",
     "backup": {
         "type": "BackupS3",
-        "directory": "cdse/sentinel-1/ocn",
+        "directory": "archive/ocn",
         "calendar_tree": true,
         "enable_gzip": false,
         "s3_endpoint_url": "http://minio:9000",
@@ -61,7 +66,7 @@ A single file is uploaded to **every** bucket of `buckets`.
         "s3_secret_key": "minioadmin",
         "s3_signature_version": "s3v4",
         "s3_region": "us-east-1",
-        "buckets": ["cdse-backup"]
+        "buckets": ["bucket-a"]
     }
 }
 ```
@@ -141,8 +146,8 @@ took. Leaving it out keeps the previous behaviour and writes nothing.
     "...": "...",
     "backup": {
         "type": "BackupS3",
-        "directory": "cdse/sentinel-1/ocn",
-        "buckets": ["cdse-backup", "cdse-backup-cold"],
+        "directory": "archive/ocn",
+        "buckets": ["bucket-a", "bucket-b"],
         "report_model": "Backup"
     }
 }
@@ -172,6 +177,16 @@ The model shall declare these fields:
 | `status` | `Keyword` | `OK` or `KO` |
 | `error_type` | `Keyword` | exception class name when the status is `KO` |
 | `details` | `Text` | error message when the status is `KO` |
+| `origin` | `Keyword` | `collector` for the file backups, `archive` for the transfer stage of the archive |
+| `backup_name` | `Keyword` | name of the named backup, empty for an inline block |
+| `operation_id` | `Keyword` | operation that requested the transfer, empty for the file backups |
+| `product_id` | `Keyword` | archived product, empty for the file backups |
+| `product_name` | `Keyword` | archived product name, empty for the file backups |
+| `written_md5` | `Keyword` | MD5 of the object written, empty for the file backups |
+| `catalogue_checksum` | `Keyword` | checksum announced by the catalogue, empty for the file backups |
+
+The statuses are `OK` and `KO` for the file backups. The archive also writes
+`REPLACED`, `SKIPPED` and `REQUESTED`.
 
 Notes:
 

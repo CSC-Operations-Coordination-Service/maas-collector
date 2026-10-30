@@ -17,15 +17,30 @@ class CollectorBackupS3Configuration(CollectorBackupConfiguration):
 
     s3_endpoint_url: str = None
 
-    s3_secret_key: str = None
+    s3_secret_key: str = dataclasses.field(default=None, metadata={"sensitive": True})
 
-    s3_access_key: str = None
+    s3_access_key: str = dataclasses.field(default=None, metadata={"sensitive": True})
 
     s3_signature_version: str = None
 
     s3_region: str = None
 
     buckets: List[str] = dataclasses.field(default_factory=lambda: [])
+
+    def __repr__(self):
+        """like FileCollectorConfiguration: the sensitive fields are masked"""
+        parts = []
+
+        for field in dataclasses.fields(self):
+            value = (
+                "*******"
+                if field.metadata.get("sensitive")
+                else getattr(self, field.name)
+            )
+
+            parts.append(f"{field.name}={value!r}")
+
+        return f"{self.__class__.__name__}({', '.join(parts)})"
 
 
 class CollectorBackupS3(CollectorBackup):

@@ -41,6 +41,18 @@
   `ConfigStore(client, index, evaluate=False)` validates its publications and
   rollbacks that way, for a service that must not execute what it validates.
 
+### Backup reports
+
+- A backup report carries `origin` (`collector`, or `archive` for the transfer stage),
+  `backup_name`, `operation_id`, `product_id`, `product_name`, `written_md5` and
+  `catalogue_checksum`, and the statuses `REPLACED`, `SKIPPED` and `REQUESTED` exist
+  next to `OK` and `KO`. Add the seven fields to the model that stores the reports.
+- The filesystem backup no longer creates its `directory`: when it does not exist, the
+  transfer is a `KO` report, so an unmounted path does not fill the disk of the
+  container. Create the directory, or mount it, before upgrading.
+- `CollectorBackupS3Configuration` marks `s3_access_key` and `s3_secret_key` as
+  sensitive and masks them in its representation.
+
 ## Version 3.13.0
 
 ### Operator image

@@ -40,9 +40,16 @@ class CollectorBackupLocal(CollectorBackup):
             config, path, self.args.directory, local_file_path
         ) as report:
 
+            # the directory itself is never created: an unmounted path would
+            # silently fill the disk of the container
+            if not os.path.isdir(self.args.directory):
+                raise FileNotFoundError(
+                    f"backup directory {self.args.directory} does not exist"
+                )
+
             parent_folder = os.path.dirname(local_file_path)
 
-            # Create the parent folder if it doesn't exist
+            # Create the folders below the directory
             os.makedirs(parent_folder, exist_ok=True)
 
             self.logger.debug(

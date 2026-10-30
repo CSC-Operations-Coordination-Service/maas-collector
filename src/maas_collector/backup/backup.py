@@ -11,6 +11,11 @@ import typing
 
 from maas_model import datetime_to_zulu
 
+OK, KO, REPLACED, SKIPPED, REQUESTED = "OK", "KO", "REPLACED", "SKIPPED", "REQUESTED"
+"""statuses of a report: the file backups write OK and KO, the archive also writes
+REPLACED (an object overwritten by a changed product), SKIPPED (already archived)
+and REQUESTED (a transfer asked and not done yet)"""
+
 
 @dataclasses.dataclass
 class BackupReport:
@@ -51,6 +56,28 @@ class BackupReport:
 
     model_name: str = ""
 
+    origin: str = "collector"
+    """who wrote the report: "collector" for the file backups, "archive" for the
+    transfer stage of the archive"""
+
+    backup_name: str = ""
+    """name of the backup that was used, empty for an inline backup block"""
+
+    operation_id: str = ""
+    """operation that requested the transfer, when there is one"""
+
+    product_id: str = ""
+    """identifier of the archived product, for the archive"""
+
+    product_name: str = ""
+    """name of the archived product, for the archive"""
+
+    written_md5: str = ""
+    """MD5 of the object written to the destination, for the archive"""
+
+    catalogue_checksum: str = ""
+    """checksum the catalogue announces for the product, for the archive"""
+
     # --- when and how long
     start_time: datetime.datetime = None
 
@@ -61,7 +88,8 @@ class BackupReport:
 
     # --- outcome
     status: str = ""
-    """"OK" or "KO", following the InterfaceProbeData convention"""
+    """OK or KO, following the InterfaceProbeData convention. The archive also
+    writes REPLACED, SKIPPED and REQUESTED"""
 
     error_type: str = ""
     """exception class name when status is KO, aggregatable in a dashboard"""
@@ -104,6 +132,9 @@ class CollectorBackupConfiguration:
     interface_name: str = None
 
     interface_credentials: str = None
+
+    backup_name: str = ""
+    """name of the named backup this block was resolved from, put in every report"""
 
     report_model: str = None
     """name of the model class storing the backup reports of this configuration.
@@ -224,6 +255,7 @@ class CollectorBackup:
             # does not declare it
             interface_name=config.interface_name or self.args.interface_name or "",
             model_name=model_name,
+            backup_name=self.args.backup_name or "",
             start_time=datetime.datetime.now(tz=datetime.UTC),
         )
 
