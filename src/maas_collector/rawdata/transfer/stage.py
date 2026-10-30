@@ -18,6 +18,8 @@ import typing
 from dataclasses import dataclass, field
 
 from opensearchpy.connection.connections import connections as es_connections
+from opensearchpy.exceptions import ConnectionError as OpenSearchConnectionError
+from opensearchpy.exceptions import TransportError
 
 from maas_collector.backup import instanciate_collector_backup
 from maas_collector.backup.backup import KO, OK, REPLACED, SKIPPED, BackupReport
@@ -78,6 +80,19 @@ class TransferSettings:
     """doubled per attempt, at most 60 s"""
 
     max_download_seconds: float = 900.0
+
+
+def is_transient_store_error(error: Exception) -> bool:
+    """Whether a failure of the index is worth waiting for: the connection, a server
+    error (5xx) or a throttling (429). Any other failure is permanent."""
+    if isinstance(error, OpenSearchConnectionError):
+        return True
+    if isinstance(error, TransportError):
+        status = error.status_code
+        return status == "N/A" or (
+            isinstance(status, int) and (status >= 500 or status == 429)
+        )
+    return False
 
 
 class RequestRefused(ValueError):
@@ -300,6 +315,26 @@ class TransferStage(FileCollector):
         except RequestRefused as error:
             LOGGER.error("Transfer request of %s refused: %s", request.interface_name, error)
             context, refusal, rule = None, error, ArchiveRule.default(request.backup)
+        # the backup versions are in the index, the sink may be built from anything:
+        # the request is acknowledged, so it is never lost nor left to kill the stage
+        except Exception as error:  # pylint: disable=broad-except
+            kind = type(error).__name__
+            if is_transient_store_error(error):
+                LOGGER.error(
+                    "Cannot resolve a transfer request of %s (%s): it is tried again",
+                    request.interface_name,
+                    kind,
+                )
+                self.sleep(self.settings.retry_delay)
+                return tuple(request.documents)
+            # never the message of the error: it may carry a value
+            LOGGER.error(
+                "Transfer request of %s cannot be resolved (%s)",
+                request.interface_name,
+                kind,
+            )
+            context, rule = None, ArchiveRule.default(request.backup)
+            refusal = RequestRefused(f"the request cannot be resolved ({kind})")
 
         try:
             products, missing = read_products(

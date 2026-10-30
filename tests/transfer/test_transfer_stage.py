@@ -9,6 +9,12 @@ from unittest.mock import Mock
 
 import botocore.exceptions
 import pytest
+from opensearchpy.exceptions import (
+    AuthorizationException,
+    ConnectionError as OpenSearchConnectionError,
+    RequestError,
+    TransportError,
+)
 
 from maas_model import datetime_to_zulu
 
@@ -639,3 +645,52 @@ def test_the_downloader_is_kept_between_requests(env):
     env.stage.handle_request(request())
     env.stage.handle_request(request(force=True))
     assert len(env.downloads.factory_calls) == 1
+
+
+def raising(error):
+    def fail(*_args, **_kwargs):
+        raise error
+
+    return fail
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OpenSearchConnectionError("N/A", "refused", Exception("refused")),
+        TransportError(503, "unavailable", {}),
+        TransportError(429, "too_many_requests", {}),
+    ],
+)
+def test_a_transient_failure_resolving_the_backup_republishes_the_documents(
+    env, monkeypatch, error
+):
+    monkeypatch.setattr(
+        "maas_collector.rawdata.transfer.stage.resolve_request_backup", raising(error)
+    )
+    assert env.stage.handle_request(request()) == (("d1", "raw-data-a-2026"),)
+    assert env.sleeps == [1.0] and env.reports() == []
+    assert env.downloads.calls == []
+
+
+def test_a_permanent_failure_resolving_the_backup_ends_ko_without_the_value(
+    env, monkeypatch
+):
+    monkeypatch.setattr(
+        "maas_collector.rawdata.transfer.stage.build_sink",
+        raising(RuntimeError("secret-value")),
+    )
+    assert env.stage.handle_request(request()) == ()
+    [report] = env.reports()
+    assert report["status"] == "KO" and "RuntimeError" in report["details"]
+    assert "secret-value" not in json.dumps(report)
+    assert env.sleeps == [] and env.downloads.calls == []
+
+
+def test_a_client_error_resolving_the_backup_ends_ko(env, monkeypatch):
+    monkeypatch.setattr(
+        "maas_collector.rawdata.transfer.stage.resolve_request_backup",
+        raising(AuthorizationException(403, "forbidden", {})),
+    )
+    assert env.stage.handle_request(request()) == ()
+    assert [r["status"] for r in env.reports()] == ["KO"]
