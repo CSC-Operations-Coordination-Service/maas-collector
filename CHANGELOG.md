@@ -24,6 +24,12 @@
   the S3 buckets, endpoint, region and signature version, and the name of the
   credential entry holding the S3 keys. The rules are in `docs/backup.md` and checked
   by `maas_collector.backup.named`.
+- Configuration validation knows `backups`: `s3_access_key` and `s3_secret_key` are
+  refused in any backup block, a definition or an inline block (an S3 block names a
+  `credentials` entry), an `@` in an `interface_name` is refused, and an entry may not
+  use the same backup as its file `backup` and in its `archive` rule. Checked together,
+  the files of a service must define every backup named by an entry (enabled or not)
+  or an archive rule, and every `report_model` (`ConfigIntegrityError`).
 
 ## Version 3.13.0
 

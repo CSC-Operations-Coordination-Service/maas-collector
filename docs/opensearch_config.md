@@ -22,7 +22,7 @@ per version of a configuration file**. The document id is `<path>@<version>`, li
 - `path` is the path of the file relative to the service directory of a file
   deployment: the path under `/conf/collector/` in the containers.
 - `content` is the file JSON, verbatim: `{"collectors": [...], "models": [...],
-  "amqp": {...}}`, each key optional. It is stored, not indexed.
+  "amqp": {...}, "backups": [...]}`, each key optional. It is stored, not indexed.
 - `services` lists the services that load the file. Several services may share a
   file: one document serves them all.
 - The current version of a path is flagged `latest`. Versions are never modified,
@@ -47,7 +47,20 @@ per version of a configuration file**. The document id is `<path>@<version>`, li
 
 The mapping is strict: OpenSearch refuses any other field. Only credential-free
 configuration files are accepted: a file whose top-level keys are not within
-`collectors`, `models` and `amqp`, like a credential file, is refused.
+`collectors`, `models`, `amqp` and `backups`, like a credential file, is refused.
+
+A backup is one file, `backups/<name>.json`, whose content is
+`{"backups": [definition]}` (see [backup.md](backup.md#named-backups)), tagged with
+every service that may use it. `validate_config_sources` checks the definition
+(name, type, directory, credentials entry name, no `s3_access_key` nor
+`s3_secret_key`, in a definition or in an inline `backup` block), that an
+`interface_name` has no `@`, that the `backup` of an entry is a name or a block, and
+that an entry does not use the same backup for its `backup` and its `archive` rule.
+Checking the files of a service together (`resolve_models`) also checks that every
+backup named by an entry or an archive rule is defined by one of the files, entries
+enabled or not, that no name is defined by two files, and that the `report_model` of
+a definition is a model of the service. A dangling reference raises
+`ConfigIntegrityError`, which lists one line per problem.
 
 ## Settings of the collectors
 
