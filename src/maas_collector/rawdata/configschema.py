@@ -9,18 +9,29 @@ a key, the keys no field marks) is in a reviewed catalog or set of this module.
 """
 
 import dataclasses
+import inspect
 import json
 import types
 import typing
 from typing import Any, Iterable
 
+import opensearchpy
+
+import maas_collector
 from maas_collector.backup import factory_type_dict
 from maas_collector.backup.named import SECRET_FIELDS
+from maas_collector.rawdata import extractor as extractors
 from maas_collector.rawdata.collector.monitorcollector import (
     InterfaceMonitorCollectorConfiguration,
 )
 from maas_collector.rawdata.implementation import _CONFIG_TO_COLLECTOR_DICT
-from maas_collector.rawdata.operator.overrides import DUPLICATES, OVERRIDABLE_KEYS
+from maas_collector.rawdata.extractor.base import BaseExtractor
+from maas_collector.rawdata.operator.overrides import (
+    DUPLICATES,
+    JIRA_CLAUSE,
+    OVERRIDABLE_KEYS,
+    ODATA_PLACEHOLDERS,
+)
 from maas_collector.rawdata.operator.replay import REPLAY_MODULES
 
 UNMARKED_SECRET_KEYS = frozenset({"oauth_basic_credential"})
@@ -539,3 +550,182 @@ def archive_rule() -> dict:
     }
     keys["backup"]["required"] = True
     return {"keys": keys}
+
+
+def _arg_type(parameter: inspect.Parameter) -> str:
+    """The schema type of a constructor parameter: its annotation, else its default"""
+    if parameter.name in ("attr_map", "converter_map"):
+        return "object"
+    if parameter.annotation is not inspect.Parameter.empty:
+        return json_type(parameter.annotation)
+    default = parameter.default
+    if isinstance(default, bool):
+        return "boolean"
+    if isinstance(default, int):
+        return "integer"
+    if isinstance(default, str):
+        return "string"
+    return "any"
+
+
+def _arg_default(parameter: inspect.Parameter) -> Any:
+    if parameter.default is inspect.Parameter.empty:
+        return None
+    try:
+        json.dumps(parameter.default)
+    except (TypeError, ValueError):
+        return None
+    return parameter.default
+
+
+def extractor_classes() -> dict:
+    """The `extractor_classes` part of the schema: the arguments of each extractor,
+    read from its constructor. `extra_args` is true when the constructor takes
+    `**kwargs`."""
+    described = {}
+    for name in sorted(dir(extractors)):
+        extractor_class = getattr(extractors, name)
+        if (
+            not inspect.isclass(extractor_class)
+            or not issubclass(extractor_class, BaseExtractor)
+            or extractor_class is BaseExtractor
+        ):
+            continue
+        args, extra = {}, False
+        for parameter in inspect.signature(
+            extractor_class.__init__
+        ).parameters.values():
+            if parameter.name == "self":
+                continue
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                extra = True
+                continue
+            if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+                continue
+            args[parameter.name] = {
+                "type": _arg_type(parameter),
+                "default": _arg_default(parameter),
+                "required": parameter.default is inspect.Parameter.empty,
+                "description": None,
+            }
+        described[name] = {"args": args}
+        if extra:
+            described[name]["extra_args"] = True
+    return described
+
+
+def _shape_key(kind: str, required: bool, description: str, group: str) -> dict:
+    return {
+        "type": kind,
+        "default": None,
+        "required": required,
+        "sensitive": False,
+        "overridable": False,
+        "group": group,
+        "description": description,
+    }
+
+
+def shapes() -> dict:
+    """The `shapes` part of the schema: the parts of a file that are not collector
+    entries. The `models` list of a file is described by `model.definition`."""
+    field_types = {"Date"} | {
+        name
+        for name, value in vars(opensearchpy).items()
+        if inspect.isclass(value) and issubclass(value, opensearchpy.Field)
+    }
+    return {
+        "extractor": {
+            "keys": {
+                "class": _shape_key(
+                    "string",
+                    True,
+                    "extractor class, see extractor_classes",
+                    "extraction",
+                ),
+                "args": _shape_key(
+                    "object",
+                    False,
+                    "arguments of the extractor, see extractor_classes",
+                    "extraction",
+                ),
+                "converter_map": _shape_key(
+                    "object",
+                    False,
+                    "converters by field name, merged into the arguments",
+                    "extraction",
+                ),
+            },
+            "attr_map_kinds": [
+                "<path string>",
+                "{attr, path?}",
+                "{python}",
+                "{rpython}",
+                "{root_path}",
+            ],
+            "converter_kinds": [
+                '{type: "regex", expression, format?}',
+                '{type: "python", python}',
+            ],
+        },
+        "model": {
+            "forms": ["name", "definition"],
+            "field_types": sorted(field_types),
+            "definition": {
+                "keys": {
+                    "name": _shape_key("string", True, "name of the model", "model"),
+                    "index": _shape_key(
+                        "string", True, "index the documents are written to", "model"
+                    ),
+                    "fields": _shape_key(
+                        "list",
+                        True,
+                        "list of {name, type}, type being one of field_types",
+                        "model",
+                    ),
+                    "partition_field": _shape_key(
+                        "string",
+                        False,
+                        "date field that partitions the index, or ingestionTime",
+                        "model",
+                    ),
+                    "partition_format": _shape_key(
+                        "string",
+                        False,
+                        "date format of the partition, yearly by default",
+                        "model",
+                    ),
+                }
+            },
+        },
+        "amqp": {
+            "keys": {
+                "chunk_size": _shape_key(
+                    "integer",
+                    False,
+                    "positive number of messages sent together, by routing key",
+                    "other",
+                )
+            }
+        },
+    }
+
+
+def configuration_schema() -> dict:
+    """The whole schema, JSON-able: what a configuration file can hold"""
+    return {
+        "version": maas_collector.__version__,
+        "collector_classes": collector_classes(),
+        "extractor_classes": extractor_classes(),
+        "backup_types": backup_types(),
+        "archive_rule": archive_rule(),
+        "secret_keys": sorted(SECRET_KEYS),
+        "window_rules": {
+            "odata": {
+                "date_field_key": "filter_date_v4",
+                "placeholders": list(ODATA_PLACEHOLDERS),
+            },
+            "jira": {"clause": JIRA_CLAUSE},
+        },
+        "shapes": shapes(),
+    }

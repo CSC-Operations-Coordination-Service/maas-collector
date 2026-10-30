@@ -108,6 +108,16 @@
   `-short` and `-long` queues of its earlier worker: they stay bound and keep receiving
   copies of the requests.
 
+### Configuration schema
+
+- `maas_collector.rawdata.configschema.configuration_schema()` describes the configuration
+  of maas-collector for the configuration builder: the keys of every collector class
+  (type, default, required, sensitive, overridable, group, description), the arguments
+  of the extractors, the backup definitions, the archive rule, the secret keys, the
+  window rules and the shapes of the models, the amqp chunk sizes and the extractor
+  block. A test fails when a field looks like a credential and nobody classified it.
+  See `docs/configuration_schema.md`.
+
 ## Version 3.13.0
 
 ### Operator image

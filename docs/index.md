@@ -16,6 +16,8 @@ maas-collector is the component that ingest data files into MAAS raw database fo
 
 - [Custom recollects](custom_recollect)
 
+- [Configuration schema](configuration_schema)
+
 - [Backup](backup)
 
 - [Vault credentials](vault)
