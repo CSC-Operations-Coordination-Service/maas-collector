@@ -145,6 +145,11 @@
   documents` as its last line (status 1 and the backup line keep their rules: see
   `docs/replay.md`). A collector with an archive rule needs `CONFIG_SERVICE`, or its
   configuration does not load.
+- The operator worker starts its replay child with `--config-service=<service>`, so the
+  archive requests of the child go to the transfer stage of the service. A child that
+  exits 69 (`TRANSFER_FAILED_EXIT_CODE`) fails the operation with `N documents could not
+  be sent to the transfer stage`, and names the files that could not be backed up on a
+  second line when there were some.
 
 ## Version 3.13.0
 

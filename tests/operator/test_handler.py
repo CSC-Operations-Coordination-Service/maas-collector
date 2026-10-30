@@ -21,10 +21,13 @@ from maas_engine.replay.request import ReplayRequest
 
 from fakeopensearch import add_config_document
 
-from maas_collector.rawdata.collector.filecollector import BACKUP_FAILED_EXIT_CODE
+from maas_collector.rawdata.collector.filecollector import (
+    BACKUP_FAILED_EXIT_CODE,
+    TRANSFER_FAILED_EXIT_CODE,
+)
 from maas_collector.rawdata.configstore import ConfigStore
 from maas_collector.rawdata.operator import handler as handler_module
-from maas_collector.rawdata.operator.handler import CollectorReplayHandler
+from maas_collector.rawdata.operator.handler import CollectorReplayHandler, Prepared
 
 START = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
 CONF_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "conf")
@@ -1026,3 +1029,38 @@ def test_the_single_lane_runs_plain_and_custom_requests_one_at_a_time(
         assert command[command.index("--healthcheck-port") + 1] == "18081"
         assert command[command.index("--replay-interface-name") + 1] == "ITF_A"
         assert env["MAAS_INSTANCE_ID"].endswith("-replay-single")
+
+
+def test_the_child_is_given_the_service_of_the_handler(store):
+    command, _env = CollectorReplayHandler(
+        store, "svc", ("short", "long"), 18081, 3
+    ).command(Prepared("/copy", "odata"), req(), "short")
+    assert "--config-service=svc" in command
+
+
+def test_describe_failure_of_unsent_transfer_requests():
+    text = CollectorReplayHandler.describe_failure(
+        TRANSFER_FAILED_EXIT_CODE, "line\ntransfer requests failed: 3 documents"
+    )
+    assert text.splitlines()[0] == "3 documents could not be sent to the transfer stage"
+    assert "line" in text
+
+
+def test_describe_failure_without_the_count_line():
+    assert (
+        CollectorReplayHandler.describe_failure(TRANSFER_FAILED_EXIT_CODE, "line").splitlines()[0]
+        == "transfer requests could not all be sent"
+    )
+
+
+def test_describe_failure_of_transfer_and_backup_failures_names_both():
+    tail = (
+        "backup failed: 2 files to archive-a\n"
+        "transfer requests failed: 3 documents\nINFO exiting"
+    )
+    assert CollectorReplayHandler.describe_failure(
+        TRANSFER_FAILED_EXIT_CODE, tail
+    ).splitlines()[:2] == [
+        "3 documents could not be sent to the transfer stage",
+        "2 files could not be backed up to archive-a",
+    ]

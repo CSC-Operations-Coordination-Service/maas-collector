@@ -174,3 +174,23 @@ def test_a_requester_starting_with_a_dash_stays_one_argument():
 def test_replay_args_default_requester_is_empty():
     replay_args = ReplayArgs("ITF_A", "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z")
     assert replay_args.requested_by == ""
+
+
+def test_command_names_the_service():
+    assert (
+        build_command("odata", "/c", req(), 18081, 3, service="svc")[-1]
+        == "--config-service=svc"
+    )
+
+
+def test_command_without_service_has_no_config_service():
+    assert not any(
+        item.startswith("--config-service")
+        for item in build_command("odata", "/c", req(), 18081, 3)
+    )
+
+
+def test_command_names_the_requester():
+    assert "--replay-requested-by=alice" in build_command(
+        "odata", "/c", req(requested_by="alice"), 18081, 3
+    )

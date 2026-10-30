@@ -101,9 +101,15 @@ def build_command(
     request: ReplayRequest,
     healthcheck_port: int,
     replay_retry: int,
+    service: str = "",
 ) -> list[str]:
-    """Collector invocation, as an argument list"""
-    return [
+    """Collector invocation, as an argument list
+
+    With a service, the child is told it (`--config-service`): the child still reads
+    the copy of the configuration, the service only names the transfer stage its
+    archive requests are published for.
+    """
+    command = [
         sys.executable,
         "-m",
         f"maas_collector.rawdata.cli.{module}",
@@ -124,6 +130,9 @@ def build_command(
         f"--replay-suffix={request.operation_id}",
         f"--replay-requested-by={request.requested_by}",
     ]
+    if service:
+        command.append(f"--config-service={service}")
+    return command
 
 
 def child_environment(environ: Mapping[str, str], lane: str = "") -> dict[str, str]:

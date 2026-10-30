@@ -151,8 +151,10 @@ window twice. No AMQP connection is held while a replay runs.
 For each request, the lane copies the configuration of the service from the index to
 a temporary folder of the work folder, runs the odata or jirax collector on it as a
 child process in replay mode, with `--replay-suffix=<operation_id>`,
-`--replay-requested-by=<requester>` and `--replay-retry <OPERATOR_REPLAY_RETRY>`,
-then removes the folder. The child is killed at the lane timeout, even when it prints
+`--replay-requested-by=<requester>`, `--replay-retry <OPERATOR_REPLAY_RETRY>` and
+`--config-service=<service>`, then removes the folder. The child still reads the copy
+of the configuration: `--config-service` only names the service whose transfer stage
+receives the [archive](archive) requests of the entries that have an `archive` rule. The child is killed at the lane timeout, even when it prints
 nothing.
 
 The operation record, written by the backend in `maas-operation` before it publishes
@@ -165,7 +167,11 @@ the request, is updated by id; the worker never creates a record:
   the replay, for an interface disabled or missing in its copy, or a jira one
   without `end_point`. It exits 74 when files could not be backed up, and the record
   says `N files could not be backed up to <backup>` (found in the last line the child
-  printed, `backup failed: N files to <backup>`, even when other output follows it);
+  printed, `backup failed: N files to <backup>`, even when other output follows it).
+  It exits 69 when the transfer requests of an archive rule could not all be sent, and
+  the record says `N documents could not be sent to the transfer stage` (from
+  `transfer requests failed: N documents`); when files could not be backed up as well,
+  a second line names them. The transfer code wins over the backup code;
 - `FAILED` with the reason, and no child run, when the interface is missing,
   disabled, deleted, of another service or of a class that cannot be replayed, or
   when the copy skipped configuration files of the service (bad paths in the index),

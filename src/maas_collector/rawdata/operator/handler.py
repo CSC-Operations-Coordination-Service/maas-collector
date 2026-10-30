@@ -22,6 +22,8 @@ from maas_collector.rawdata.collector.filecollector import (
     BACKUP_FAILED_EXIT_CODE,
     BACKUP_FAILURE_LINE,
     REPLAY_FAILED_EXIT_CODE,
+    TRANSFER_FAILED_EXIT_CODE,
+    TRANSFER_FAILURE_LINE,
 )
 from maas_collector.rawdata.configprovider import (
     ConfigValidationError,
@@ -314,6 +316,7 @@ class CollectorReplayHandler:
                 ),
                 self.healthcheck_port + self.lanes.index(slot_of(lane)),
                 self.replay_retry,
+                service=self.service,
             ),
             child_environment(self.environ or os.environ, lane),
         )
@@ -328,19 +331,46 @@ class CollectorReplayHandler:
     @staticmethod
     def describe_failure(code: int, tail: str) -> str:
         """Why a replay failed: the collector's own exit code says what it found"""
+        reasons = []
         if code == REPLAY_FAILED_EXIT_CODE:
-            reason = "an interface failed during the replay"
+            reasons.append("an interface failed during the replay")
+        elif code == TRANSFER_FAILED_EXIT_CODE:
+            reasons.append(
+                _count_line(
+                    tail,
+                    TRANSFER_FAILURE_LINE,
+                    "{count} documents could not be sent to the transfer stage",
+                    "transfer requests could not all be sent",
+                )
+            )
+            # a replay that failed both ways says so: neither is lost
+            backup = _count_line(
+                tail,
+                BACKUP_FAILURE_LINE,
+                "{count} files could not be backed up to {backup}",
+                "",
+            )
+            if backup:
+                reasons.append(backup)
         elif code == BACKUP_FAILED_EXIT_CODE:
-            reason = "files could not be backed up"
-            # the line is the last one the collector printed, other output may follow
-            for line in reversed(tail.splitlines()):
-                found = BACKUP_FAILURE_LINE.fullmatch(line.strip())
-                if found:
-                    reason = (
-                        f"{found['count']} files could not be backed up"
-                        f" to {found['backup']}"
-                    )
-                    break
+            reasons.append(
+                _count_line(
+                    tail,
+                    BACKUP_FAILURE_LINE,
+                    "{count} files could not be backed up to {backup}",
+                    "files could not be backed up",
+                )
+            )
         else:
-            reason = f"exit code {code}"
-        return f"{reason}\n{tail}"
+            reasons.append(f"exit code {code}")
+        return "\n".join([*reasons, tail])
+
+
+def _count_line(tail: str, pattern, template: str, default: str) -> str:
+    """The text for the last line of a tail that matches a failure line"""
+    # the line is the last one the collector printed, other output may follow
+    for line in reversed(tail.splitlines()):
+        found = pattern.fullmatch(line.strip())
+        if found:
+            return template.format(**found.groupdict())
+    return default
