@@ -155,6 +155,16 @@ def missing_product(document: tuple[str, str]) -> dict:
     }
 
 
+def unreadable_product(document: tuple[str, str], error_kind: str) -> dict:
+    """The stand-in of a document the index refuses to give, named by the class of
+    the error, never by its message"""
+    document_id, document_index = document
+    return missing_product(document) | {
+        "details": f"document {document_id} cannot be read from "
+        f"{document_index} ({error_kind})"
+    }
+
+
 def archived_state(
     client, backup: str, interface: str, product_name: str
 ) -> dict[str, dict]:

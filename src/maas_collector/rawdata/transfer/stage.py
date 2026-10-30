@@ -58,6 +58,7 @@ from maas_collector.rawdata.transfer.reports import (
     archived_state,
     missing_product,
     read_products,
+    unreadable_product,
     write_reports,
 )
 from maas_collector.rawdata.transfer.rule import ArchiveRule, utc_datetime
@@ -340,11 +341,32 @@ class TransferStage(FileCollector):
             products, missing = read_products(
                 es_connections.get_connection(), request.documents, rule
             )
-        # the index cannot be read: nothing is lost if the documents wait
         except Exception as error:  # pylint: disable=broad-except
-            LOGGER.error("Cannot read the documents of a transfer request: %s", error)
-            self.sleep(self.settings.retry_delay)
-            return tuple(request.documents)
+            kind = type(error).__name__
+            # the index cannot be reached: nothing is lost if the documents wait
+            if is_transient_store_error(error):
+                LOGGER.error("Cannot read the documents of a transfer request: %s", kind)
+                self.sleep(self.settings.retry_delay)
+                return tuple(request.documents)
+            # a refusal or a bad index never changes: the documents end KO, or they
+            # would be published again forever
+            LOGGER.error("The documents of a transfer request are unreadable: %s", kind)
+            self.store(
+                [
+                    archive_report(
+                        request,
+                        stand_in,
+                        KO,
+                        error_type="DocumentNotReadable",
+                        details=stand_in["details"],
+                    )
+                    for stand_in in (
+                        unreadable_product(document, kind)
+                        for document in request.documents
+                    )
+                ]
+            )
+            return ()
 
         if missing:
             self.store(

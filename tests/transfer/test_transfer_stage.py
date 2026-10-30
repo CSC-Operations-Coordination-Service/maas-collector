@@ -694,3 +694,36 @@ def test_a_client_error_resolving_the_backup_ends_ko(env, monkeypatch):
     )
     assert env.stage.handle_request(request()) == ()
     assert [r["status"] for r in env.reports()] == ["KO"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OpenSearchConnectionError("N/A", "refused", Exception("refused")),
+        TransportError(502, "bad_gateway", {}),
+        TransportError(429, "too_many_requests", {}),
+    ],
+)
+def test_a_transient_read_failure_republishes_the_documents(env, monkeypatch, error):
+    monkeypatch.setattr(env.es, "get", raising(error))
+    assert env.stage.handle_request(request()) == (("d1", "raw-data-a-2026"),)
+    assert env.sleeps == [1.0] and env.reports() == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        AuthorizationException(403, "forbidden", {}),
+        RequestError(400, "invalid_index_name_exception", {}),
+    ],
+)
+def test_an_unreadable_document_ends_ko_instead_of_waiting_forever(
+    env, monkeypatch, error
+):
+    monkeypatch.setattr(env.es, "get", raising(error))
+    assert env.stage.handle_request(request()) == ()
+    [report] = env.reports()
+    assert (report["status"], report["error_type"]) == ("KO", "DocumentNotReadable")
+    assert "d1" in report["details"] and "raw-data-a-2026" in report["details"]
+    assert type(error).__name__ in report["details"]
+    assert env.sleeps == [] and env.downloads.calls == []
