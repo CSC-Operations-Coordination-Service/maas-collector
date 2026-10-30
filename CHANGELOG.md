@@ -42,6 +42,15 @@
   backup object is built. An entry with another field fails the backup at load, naming
   the field; an entry missing or with one key only fails the backup of the file, never
   an upload with the ambient credentials.
+- `ConfigStore` refuses, for every write (publish, rollback, delete), a reference left
+  dangling (an entry or an archive rule of an affected service naming a backup the
+  service does not load, a backup naming a report model the service does not define:
+  `ConfigIntegrityError`), and a change of the destination of a backup that has reports
+  (`BackupDestinationError`: `type`, `s3_endpoint_url`, `directory`, `calendar_tree`,
+  `enable_gzip` or a removed bucket; a name with reports cannot move to another path).
+  The guard reads `raw-data-backup*` (`ConfigStore(report_index=...)`), so the account of
+  `config` and of the backend needs read access to it. `cli.config` and the backend
+  share both checks.
 
 ### Safe configuration validation
 

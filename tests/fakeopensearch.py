@@ -6,10 +6,12 @@ CLI call: indices.exists / create, index (op_type=create answers 409 on an exist
 id), get, update, search with a bool query of term filters, sort and size, and the
 scroll calls of opensearchpy.helpers.scan. Searches also take a list of indices and
 an ids query, for MAASDocument.mget_by_ids. An index created with a "dynamic":
-"strict" mapping refuses unmapped top-level fields, like OpenSearch does.
+"strict" mapping refuses unmapped top-level fields, like OpenSearch does. An index
+name with a "*" in a search expands over the existing indices.
 """
 
 import copy
+import fnmatch
 import itertools
 
 from opensearchpy.exceptions import ConflictError, NotFoundError, RequestError
@@ -118,10 +120,18 @@ class FakeOpenSearch:
         """bool / term / terms / match_all queries, sort, size. With scroll, every
         hit comes in the first page, and scroll() ends the iteration"""
         self.check_available()
-        indices = index if isinstance(index, list) else [index]
-        for name in indices:
-            if name not in self.documents:
+        indices = []
+        for name in index if isinstance(index, list) else [index]:
+            if "*" in name:
+                # a wildcard matching no index answers no hit, like OpenSearch
+                found = [
+                    known for known in self.documents if fnmatch.fnmatch(known, name)
+                ]
+            elif name in self.documents:
+                found = [name]
+            else:
                 raise NotFoundError(404, "index_not_found_exception", name)
+            indices.extend(known for known in found if known not in indices)
         body = body or {}
         hits = [
             {"_index": name, "_id": doc_id, "_source": copy.deepcopy(source)}
@@ -230,4 +240,13 @@ def add_config_document(
             "services": services,
             "content": content,
         },
+    )
+
+
+def add_report_document(client: FakeOpenSearch, index: str, backup_name: str, **fields):
+    """write a backup report document, as a collector or the archive would"""
+    client.index(
+        index=index,
+        id=f"report-{sum(len(docs) for docs in client.documents.values()) + 1}",
+        body={"backup_name": backup_name, **fields},
     )

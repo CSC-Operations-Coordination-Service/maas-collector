@@ -14,14 +14,18 @@ import re
 from opensearchpy.exceptions import ConflictError, NotFoundError
 from opensearchpy.helpers import scan
 
+from maas_collector.backup.named import destination_changes
 from maas_collector.rawdata.collector.filecollector import FileCollectorConfiguration
 from maas_collector.rawdata.collector.monitorcollector import (
     InterfaceMonitorCollectorConfiguration,
 )
 from maas_collector.rawdata.configprovider import (
     DEFAULT_CONFIG_INDEX,
+    BackupDestinationError,
+    ConfigIntegrityError,
     ConfigSource,
     current_documents,
+    integrity_problems,
     validate_config_sources,
 )
 from maas_collector.rawdata.implementation import (
@@ -155,7 +159,11 @@ class ConfigStore:
     """Writer and reader of the configuration documents"""
 
     def __init__(
-        self, client, index: str = DEFAULT_CONFIG_INDEX, evaluate: bool = True
+        self,
+        client,
+        index: str = DEFAULT_CONFIG_INDEX,
+        evaluate: bool = True,
+        report_index: str = "raw-data-backup",
     ):
         """
         Args:
@@ -164,12 +172,17 @@ class ConfigStore:
             evaluate (bool, optional): False validates publications and rollbacks
                 without evaluating any lambda or converter, for a service that must
                 not execute what it validates. Defaults to True.
+            report_index (str, optional): the backup reports, read with a trailing
+                wildcard (the yearly partitions) to know whether a backup has reports.
+                Defaults to raw-data-backup.
         """
         self.client = client
 
         self.index = index
 
         self.evaluate = evaluate
+
+        self.report_index = report_index
 
         self._index_ready = False
 
@@ -297,6 +310,11 @@ class ConfigStore:
         for service in services:
             check_service(service)
 
+        if not deleted:
+            self._check_destinations(path, content, history)
+
+        self._check_integrity(path, content, services, deleted, history)
+
         version = current + 1
         interface_names, model_names = content_names(content)
 
@@ -333,6 +351,110 @@ class ConfigStore:
         LOGGER.info("Published %s", document_id(path, version))
 
         return document
+
+    def _has_reports(self, backup_name: str) -> bool:
+        """True when a backup report names the backup, in any yearly partition of the
+        report index. Reports are matched on the name alone.
+
+        Raises:
+            opensearchpy.exceptions.OpenSearchException: when the report index cannot
+                be read (the change is refused), apart from a missing index, which
+                means no reports
+        """
+        try:
+            response = self.client.search(
+                index=f"{self.report_index}*",
+                body={
+                    "size": 1,
+                    "_source": False,
+                    "query": {"term": {"backup_name": backup_name}},
+                },
+            )
+        except NotFoundError:
+            return False
+
+        return bool(response["hits"]["hits"])
+
+    def _check_destinations(self, path: str, content: dict, history: list) -> None:
+        """refuse a backup that changes its destination once it has reports
+
+        The previous definitions are those of the last version of the path that is not
+        a tombstone, so that deleting then creating a backup again is compared with
+        what the tombstone replaced.
+
+        Raises:
+            BackupDestinationError: a destination key changed, or a name that has
+                reports is defined by another path
+        """
+        previous = {}
+
+        for document in reversed(history):
+            if not document.get("deleted"):
+                for definition in document["content"].get("backups") or []:
+                    if isinstance(definition, dict):
+                        previous[definition.get("name")] = definition
+                break
+
+        for definition in content.get("backups") or []:
+            name = definition.get("name")
+
+            if name in previous:
+                changes = destination_changes(previous[name], definition)
+
+                if changes and self._has_reports(name):
+                    raise BackupDestinationError(
+                        path,
+                        f"backup {name}: {', '.join(changes)} cannot change once the"
+                        " backup has reports; derive a new backup instead",
+                    )
+
+            elif self._has_reports(name):
+                raise BackupDestinationError(
+                    path,
+                    f"backup {name}: the name already has reports; a backup keeps"
+                    " its file path, derive a new backup under a new name",
+                )
+
+    def _check_integrity(
+        self, path: str, content: dict, services: list, deleted: bool, history: list
+    ) -> None:
+        """refuse a write that leaves a reference dangling in a service it affects
+
+        The affected services are those of the new version (unless it is a tombstone)
+        and those of the current version (unless it is one), so untagging, deleting
+        and renaming are covered.
+
+        Raises:
+            ConfigIntegrityError: an entry or an archive rule of an affected service,
+                enabled or not, names a backup the service does not load, or a backup
+                names a report model the service does not define
+        """
+        affected = set()
+
+        if not deleted:
+            affected.update(services)
+
+        if history and not history[-1].get("deleted"):
+            affected.update(history[-1]["services"])
+
+        problems = []
+
+        for service in sorted(affected):
+            sources = [
+                ConfigSource(document["path"], document["content"])
+                for document in self.latest(service=service)
+                if not document["deleted"] and document["path"] != path
+            ]
+
+            if not deleted and service in services:
+                sources.append(ConfigSource(path, content))
+
+            problems.extend(
+                f"service {service}: {line}" for line in integrity_problems(sources)
+            )
+
+        if problems:
+            raise ConfigIntegrityError(path, problems)
 
     def _clear_latest(self, path: str, version: int):
         """clear the latest flag of the versions below version. Also repairs the

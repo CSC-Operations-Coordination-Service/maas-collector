@@ -210,6 +210,37 @@ services:
         condition: any
 ```
 
+## Backups
+
+A backup is one file, `backups/<name>.json`, tagged with every service that may use it
+(see [backup.md](backup.md#named-backups) for the definition). Each backup has its own
+versions, history and rollback.
+
+- **Extend or derive.** A new version may change the description, the report model,
+  the credentials entry and add a bucket (several buckets are mirrors: every file is
+  written to each of them). It may not change the **destination keys**: `type`,
+  `s3_endpoint_url`, `directory`, `calendar_tree`, `enable_gzip` and a removed bucket,
+  once the backup has reports. Derive a new backup under a new name instead.
+- **The guard** lives in `ConfigStore`, so the CLI and the backend share it, and
+  applies to `publish`, `rollback`, and a backup deleted then created again (it is
+  compared with what the tombstone replaced). It looks for a report naming the backup
+  in `raw-data-backup*` (`ConfigStore(..., report_index=...)`), every yearly partition
+  included, so the account of `config` and of the backend needs read access to that
+  index. A report index that cannot be read refuses the change; a missing one means no
+  reports.
+- **Reports are matched on the name alone.** A same-named backup of another service
+  that has reports also blocks a change (accepted, conservative), and a name that has
+  reports cannot be defined by another path: a backup keeps its file path.
+- **Reference integrity.** For every write (publish, rollback, delete), with the write
+  applied, no entry or archive rule of an affected service (enabled or not) may name a
+  backup the service does not load, and no backup may name a report model the service
+  does not define. The affected services are those of the new version and those of the
+  current one, so deleting a backup, untagging a service, renaming a backup and rolling
+  back to an older version or a tombstone are covered. A refusal raises
+  `ConfigIntegrityError`, with one line per problem
+  (`service odata: backups/x.json: interface ITF_A uses backup nope, which is not defined`);
+  nothing is written.
+
 ## Roles
 
 **Configurations run code**: the `{"python": "lambda ..."}` values of a
@@ -220,6 +251,10 @@ means code execution in every collector that reads it.
 - Only the administrators running the CLI get write access.
 - Check that no other role of the collector users grants write access to the index,
   for example through a `*` index pattern.
+- The account that writes (the CLI, or a service using `ConfigStore`) also needs
+  **read** access to the backup report indices, `raw-data-backup*`: the destination
+  guard of a backup reads them (see [Backups](#backups)). Without it, a change to a
+  backup destination is refused.
 
 With the OpenSearch security plugin:
 
