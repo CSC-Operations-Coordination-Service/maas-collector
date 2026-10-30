@@ -163,6 +163,11 @@
   A conflict (a product seen again with another checksum) is recorded in the index
   `maas-archive-conflict` until a later transfer resolves it. Start one stage per
   collector service before using an archive rule: it declares the queue of the service.
+- `maas_collector.rawdata.transfer.gaps.find_gaps` lists the products of an archived
+  interface indexed more than a delay ago with no outcome report (`OK`, `REPLACED`,
+  `KO`, `SKIPPED`) in a backup: the gaps a crash or an unpublished request leave. The
+  model of the entry must declare an `interface_name` field (a `ValueError` otherwise).
+  The test fake of OpenSearch understands `range` queries.
 
 ## Version 3.13.0
 

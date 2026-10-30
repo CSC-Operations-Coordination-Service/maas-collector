@@ -230,3 +230,22 @@ Nothing yet tells a consumer that a product has arrived. Three ways, none coded:
 
 Whichever is chosen: emit only once the object is complete, and make a replacement
 distinguishable from a first arrival.
+
+## Gaps
+
+A **gap** is a product of an archived interface indexed more than a set delay ago (the
+backend uses 6 hours) with no archive report in its backup: `maas_collector.rawdata.
+transfer.gaps.find_gaps` lists them, from the raw documents indexed in a window, as
+`{product_id, product_name, document_index, indexed_at}` sorted by `indexed_at`.
+
+- A report counts when its status is an outcome (`OK`, `REPLACED`, `KO` or `SKIPPED`)
+  for the backup, the interface and the product name: a `REQUESTED` report alone leaves
+  a gap, since nothing came of the request. A `KO` is an outcome: the product is
+  reported as failed, not missing.
+- The products are read through the `fields` of the rule of the entry (the defaults
+  without one), from the index of the model of the entry (a model name is resolved among
+  the current files of the configuration index).
+- The model of the entry must declare an `interface_name` field, and its extractor must
+  fill it: without it the products of the interface cannot be told apart, and
+  `find_gaps` raises a `ValueError` naming the interface and the model rather than
+  answering that nothing is missing.
