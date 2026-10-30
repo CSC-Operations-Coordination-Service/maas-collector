@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## Version 3.14.0
+
+Released 2026-10-30. Upgrade note: see "Satellite unavailability reports" before moving a collector that loads `SatUnavailabilityExtractor`.
 
 ### Satellite unavailability reports
 
