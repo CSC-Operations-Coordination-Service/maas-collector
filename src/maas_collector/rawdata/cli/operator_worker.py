@@ -11,7 +11,7 @@ import socket
 import sys
 
 import kombu
-from maas_engine.replay import Lane, LaneTimeout, OperationRecorder, ReplayWorker
+from maas_engine.replay import OperationRecorder, ReplayWorker
 from opensearchpy.connection.connections import connections as es_connections
 
 import maas_collector.rawdata.cli.lib.log as maas_log
@@ -26,13 +26,9 @@ from maas_collector.rawdata.collector.credentialprovider import (
 from maas_collector.rawdata.collector.filecollector import CollectorArgs
 from maas_collector.rawdata.configstore import ConfigStore
 from maas_collector.rawdata.operator.check import ProductChecker
-from maas_collector.rawdata.operator.contract import (
-    LANES,
-    exchange,
-    replay_queue_name,
-    replay_routing_key,
-)
+from maas_collector.rawdata.operator.contract import LANES, exchange
 from maas_collector.rawdata.operator.handler import CollectorReplayHandler
+from maas_collector.rawdata.operator.lanes import build_lanes
 from maas_collector.rawdata.operator.worker import (
     CheckWorker,
     OperatorSettings,
@@ -151,25 +147,16 @@ def operator_worker_main(argv: list[str]) -> int:
     store = ConfigStore(client, settings.config_index)
     recorder = OperationRecorder(client, settings.operation_index)
 
-    # the short lane has a fixed timeout, the long one scales with the window
-    lanes = [
-        Lane(
-            lane,
-            replay_queue_name(settings.service, lane),
-            replay_routing_key(settings.service, lane),
-            LaneTimeout(
-                base=settings.short_timeout,
-                per_day=settings.long_timeout_per_day if lane == "long" else 0,
-            ),
-        )
-        for lane in LANES
-    ]
+    lanes = build_lanes(settings)
     handler = CollectorReplayHandler(
         store,
         settings.service,
         LANES,
         settings.healthcheck_port,
         settings.replay_retry,
+        # its own provider: the checker reads `unreadable` after each of its loads,
+        # and every load rewrites it
+        credential_provider=build_credential_provider(args),
     )
 
     checker = ProductChecker(

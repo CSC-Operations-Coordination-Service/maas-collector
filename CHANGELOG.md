@@ -94,6 +94,14 @@
 - The replay option `--replay-requested-by` (variable `REPLAY_REQUESTED_BY`, default
   empty) tells the collector who asked for a replay (`ReplayArgs.requested_by`). The
   operator worker passes the requester of the request to its child.
+- The operator worker has a custom lane beside each lane (`custom-short`, `custom-long`),
+  with the queue `maas-operator-<service>-replay-custom-<lane>` bound to the key
+  `maas.operator.<service>.replay-custom.<lane>` only. A custom request names its
+  interface `<interface>@custom`, with the real name in `interface`, and carries
+  `overrides`, `configuration` and `archive`. A custom lane shares the slot (lock and
+  health check port) of its plain lane, and a custom request on a plain lane is refused.
+  The handler applies the overrides and the archive choice to the interface's entry in
+  the configuration copy and validates the copy statically before it starts the child.
 
 ## Version 3.13.0
 

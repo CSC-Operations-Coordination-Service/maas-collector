@@ -409,7 +409,11 @@ def test_cli_wires_the_collector_handler_and_the_lanes(monkeypatch, fake_opensea
 
     with patch(f"{module}.ReplayWorker") as worker_class, patch(
         f"{module}.OperatorWorker"
-    ), patch(f"{module}.signal.signal"), patch(
+    ), patch(f"{module}.ProductChecker") as checker_class, patch(
+        f"{module}.build_credential_provider", side_effect=lambda _args: object()
+    ), patch(
+        f"{module}.signal.signal"
+    ), patch(
         f"{module}.es_connections"
     ) as connections:
         connections.get_connection.return_value = fake_opensearch
@@ -435,6 +439,9 @@ def test_cli_wires_the_collector_handler_and_the_lanes(monkeypatch, fake_opensea
     _connect, _recorder, handler, lanes, _exchange, _workdir = (
         worker_class.call_args.args
     )
+    # its own provider: a load rewrites `unreadable`, which the checker reads
+    assert handler.credential_provider is not checker_class.call_args.args[2]
+    assert handler.credential_provider is not None
     assert (handler.replay_retry, handler.healthcheck_port, handler.service) == (
         5,
         19000,
@@ -448,8 +455,20 @@ def test_cli_wires_the_collector_handler_and_the_lanes(monkeypatch, fake_opensea
             "maas.operator.odata.replay.short",
         ),
         ("long", "maas-operator-odata-replay-long", "maas.operator.odata.replay.long"),
+        (
+            "custom-short",
+            "maas-operator-odata-replay-custom-short",
+            "maas.operator.odata.replay-custom.short",
+        ),
+        (
+            "custom-long",
+            "maas-operator-odata-replay-custom-long",
+            "maas.operator.odata.replay-custom.long",
+        ),
     ]
     assert [(lane.timeout.base, lane.timeout.per_day) for lane in lanes] == [
+        (60, 0),
+        (60, 20),
         (60, 0),
         (60, 20),
     ]

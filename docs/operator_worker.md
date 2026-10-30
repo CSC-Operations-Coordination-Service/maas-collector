@@ -78,6 +78,8 @@ Every queue is bound to the topic exchange `maas-operator-exchange` (durable):
 | -------------------------------------- | --------------------------------------- | --------------------------- |
 | `maas-operator-<service>-replay-short` | `maas.operator.<service>.replay.short`  | replays of 24 h at most     |
 | `maas-operator-<service>-replay-long`  | `maas.operator.<service>.replay.long`   | longer replays              |
+| `maas-operator-<service>-replay-custom-short` | `maas.operator.<service>.replay-custom.short` | custom replays of 24 h at most |
+| `maas-operator-<service>-replay-custom-long`  | `maas.operator.<service>.replay-custom.long`  | longer custom replays          |
 | `maas-operator-<service>-check`        | `maas.operator.<service>.check`         | product checks              |
 
 Dates are ISO 8601 UTC with `Z`. A replay request is:
@@ -88,7 +90,41 @@ Dates are ISO 8601 UTC with `Z`. A replay request is:
  "requested_by": "bob", "lane": "short"}
 ```
 
+A **custom** replay request (see [custom recollects](custom_recollect)) is published with
+the key `maas.operator.<service>.replay-custom.<lane>` and carries the fields below. Its
+`interface_name` is the real name followed by `@custom`, the real name being repeated in
+`interface`; at least one of `overrides`, `configuration` and `archive` is set (`{}`
+counts for the two objects, an empty `configuration` does not):
+
+```json
+{"operation_id": "...", "interface_name": "PRIP_S3A_ACRI@custom",
+ "interface": "PRIP_S3A_ACRI",
+ "start_date": "2026-10-01T00:00:00Z", "end_date": "2026-10-02T00:00:00Z",
+ "requested_by": "bob", "lane": "short",
+ "overrides": {"download_file_pattern": ["*.EOF*"]}, "configuration": "",
+ "archive": {"backup": "archive-a", "backup_version": null,
+             "duplicates": "skip", "force": false}}
+```
+
 ## Replays
+
+### Custom lanes
+
+Beside `short` and `long`, a worker has two **custom lanes**, `custom-short` and
+`custom-long`, each with a queue of its own that only the custom key reaches. A custom
+lane takes the timeout of its plain lane, and shares its **slot**: one lock and one
+health check port per plain lane, so a custom request waits (its record staying
+`RUNNING`) while the child of the other lane of its slot runs, and a service never runs
+more children than it has plain lanes.
+
+A worker serves a custom request on a custom lane only. On a plain lane it records the
+operation `FAILED` without running anything, and a worker that does not know custom
+requests finds no interface called `<name>@custom` and fails the record the same way:
+a custom recollect is never run as a live replay. The publisher must publish a custom
+request as mandatory: it fails when no worker declared the custom queue.
+
+The child runs the real interface name, on a copy of the configuration where the entry
+has the overrides applied and the copy is validated statically (nothing is evaluated).
 
 A lane takes one request at a time. It polls its queue and **acknowledges a request
 on receipt**: a replay can run for hours, and a redelivered one would collect its
