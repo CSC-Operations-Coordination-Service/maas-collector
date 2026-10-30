@@ -102,3 +102,103 @@ def test_check_reply_body():
         "diff": [{"field": "a", "remote": 1, "stored": 2}],
         "error": None,
     }
+
+
+BASE = {
+    "operation_id": "op1",
+    "interface_name": "ITF_A",
+    "start_date": T0,
+    "end_date": T0 + datetime.timedelta(days=1),
+    "requested_by": "bob",
+}
+
+
+def test_custom_names():
+    assert c.CUSTOM_SUFFIX == "@custom"
+    assert (
+        c.replay_custom_routing_key("odata", "long")
+        == "maas.operator.odata.replay-custom.long"
+    )
+    assert (
+        c.replay_custom_queue_name("odata", "short")
+        == "maas-operator-odata-replay-custom-short"
+    )
+
+
+def test_a_plain_request_is_unchanged():
+    r = c.ReplayRequest.from_body(replay())
+    assert (r.is_custom, r.overrides, r.configuration, r.archive) == (
+        False,
+        None,
+        "",
+        None,
+    )
+    assert r.to_body() == c.ReplayRequest.from_body(r.to_body()).to_body()
+    assert set(r.to_body()) == {
+        "operation_id",
+        "interface_name",
+        "start_date",
+        "end_date",
+        "requested_by",
+        "lane",
+    }
+    assert r.routing_key("odata") == "maas.operator.odata.replay.short"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"overrides": {"jql_query": "x"}},
+        {"overrides": {}},
+        {"configuration": "named@2"},
+        {
+            "archive": {
+                "backup": "archive-a",
+                "backup_version": 3,
+                "duplicates": "skip",
+                "force": False,
+            }
+        },
+    ],
+)
+def test_a_custom_request_round_trips_with_the_suffixed_name(fields):
+    r = c.ReplayRequest(**{**BASE, "lane": "long"}, **fields)
+    body = r.to_body()
+    assert (r.is_custom, body["interface_name"], body["interface"]) == (
+        True,
+        "ITF_A@custom",
+        "ITF_A",
+    )
+    assert c.ReplayRequest.from_body(body) == r
+    assert r.routing_key("odata") == "maas.operator.odata.replay-custom.long"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"interface_name": "ITF_A@custom"},
+        {"overrides": {"a": 1}},
+        {"overrides": {}},
+        {"interface_name": "ITF_A@custom", "interface": "ITF_A", "configuration": ""},
+        {
+            "interface_name": "ITF_A@custom",
+            "interface": "OTHER",
+            "overrides": {"a": 1},
+        },
+        {
+            "interface_name": "A@custom@custom",
+            "interface": "A@custom",
+            "overrides": {"a": 1},
+        },
+        {"interface_name": "ITF_A@custom", "interface": "ITF_A", "overrides": [1]},
+        {
+            "interface_name": "ITF_A@custom",
+            "interface": "ITF_A",
+            "archive": "archive-a",
+        },
+        {"interface_name": "ITF_A@custom", "interface": "ITF_A", "configuration": 3},
+    ],
+)
+def test_inconsistent_custom_bodies_are_refused(change):
+    with pytest.raises(ValueError):
+        c.ReplayRequest.from_body(replay(**change))

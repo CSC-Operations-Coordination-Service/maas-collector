@@ -13,6 +13,10 @@ EXCHANGE_NAME = "maas-operator-exchange"
 OPERATION_INDEX = "maas-operation"
 LANES = ("short", "long")
 SHORT_LANE_MAX = datetime.timedelta(hours=24)
+# a custom replay request names its interface "<interface>@custom", the real name
+# being in the "interface" field of the body: a worker that does not know custom
+# requests looks for an interface of that name, finds none and fails the operation
+CUSTOM_SUFFIX = "@custom"
 
 
 def lane_for(start: datetime.datetime, end: datetime.datetime) -> str:
@@ -28,6 +32,16 @@ def replay_routing_key(service: str, lane: str) -> str:
 def replay_queue_name(service: str, lane: str) -> str:
     """Queue name of replay requests"""
     return f"maas-operator-{service}-replay-{lane}"
+
+
+def replay_custom_routing_key(service: str, lane: str) -> str:
+    """Routing key of custom replay requests"""
+    return f"maas.operator.{service}.replay-custom.{lane}"
+
+
+def replay_custom_queue_name(service: str, lane: str) -> str:
+    """Queue name of custom replay requests"""
+    return f"maas-operator-{service}-replay-custom-{lane}"
 
 
 def check_routing_key(service: str) -> str:
@@ -88,7 +102,13 @@ def _format_date(value: datetime.datetime) -> str:
 
 @dataclass(frozen=True)
 class ReplayRequest:
-    """Request to replay an interface over a window"""
+    """Request to replay an interface over a window
+
+    ``interface_name`` is the real name of the interface. A request is custom
+    when ``overrides`` or ``archive`` is not ``None`` (``{}`` is set) or
+    ``configuration`` is not empty; its body then names the interface
+    ``<interface_name>@custom`` and carries the real name in ``interface``.
+    """
 
     operation_id: str
     interface_name: str
@@ -96,13 +116,32 @@ class ReplayRequest:
     end_date: datetime.datetime
     requested_by: str = ""
     lane: str = "short"
+    overrides: dict | None = None
+    configuration: str = ""
+    archive: dict | None = None
+
+    @property
+    def is_custom(self) -> bool:
+        """True when at least one of overrides, configuration and archive is set"""
+        return (
+            self.overrides is not None
+            or bool(self.configuration)
+            or self.archive is not None
+        )
+
+    def routing_key(self, service: str) -> str:
+        """Routing key of the request: the custom one for a custom request"""
+        if self.is_custom:
+            return replay_custom_routing_key(service, self.lane)
+        return replay_routing_key(service, self.lane)
 
     @classmethod
     def from_body(cls, body: bytes | str | dict) -> "ReplayRequest":
         """Build from a message body
 
         Raises:
-            ValueError: missing field, bad date, start >= end or unknown lane
+            ValueError: missing field, bad date, start >= end, unknown lane or an
+                inconsistent custom request
         """
         data = _load(body)
         operation_id = _required(data, "operation_id")
@@ -114,6 +153,31 @@ class ReplayRequest:
         lane = data.get("lane", "short")
         if lane not in LANES:
             raise ValueError(f"unknown lane: {lane}")
+        overrides = data.get("overrides")
+        archive = data.get("archive")
+        configuration = data.get("configuration", "")
+        for name, value in (("overrides", overrides), ("archive", archive)):
+            if value is not None and not isinstance(value, dict):
+                raise ValueError(f"invalid field: {name} must be an object or null")
+        if not isinstance(configuration, str):
+            raise ValueError("invalid field: configuration must be a string")
+        is_set = overrides is not None or archive is not None or bool(configuration)
+        if interface_name.endswith(CUSTOM_SUFFIX):
+            real = interface_name[: -len(CUSTOM_SUFFIX)]
+            if not real or "@" in real or data.get("interface") != real:
+                raise ValueError(
+                    f"interface must be the interface name without {CUSTOM_SUFFIX}"
+                )
+            if not is_set:
+                raise ValueError(
+                    f"{CUSTOM_SUFFIX} without overrides, configuration or archive"
+                )
+            interface_name = real
+        elif is_set:
+            raise ValueError(
+                f"overrides, configuration and archive need the {CUSTOM_SUFFIX} "
+                "interface name"
+            )
         return cls(
             operation_id=operation_id,
             interface_name=interface_name,
@@ -121,11 +185,14 @@ class ReplayRequest:
             end_date=end,
             requested_by=data.get("requested_by") or "",
             lane=lane,
+            overrides=overrides,
+            configuration=configuration,
+            archive=archive,
         )
 
     def to_body(self) -> dict:
         """Message body, dates as ...Z"""
-        return {
+        body = {
             "operation_id": self.operation_id,
             "interface_name": self.interface_name,
             "start_date": _format_date(self.start_date),
@@ -133,6 +200,13 @@ class ReplayRequest:
             "requested_by": self.requested_by,
             "lane": self.lane,
         }
+        if self.is_custom:
+            body["interface_name"] = self.interface_name + CUSTOM_SUFFIX
+            body["interface"] = self.interface_name
+            body["overrides"] = self.overrides
+            body["configuration"] = self.configuration
+            body["archive"] = self.archive
+        return body
 
 
 @dataclass(frozen=True)
