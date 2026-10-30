@@ -450,6 +450,7 @@ def validate_config_sources(
     sources: list,
     config_classes_for: typing.Callable[[dict], list],
     resolve_models: bool = True,
+    evaluate: bool = True,
 ) -> None:
     """Check that collectors can load configuration sources, without changing the
     models the running process has registered
@@ -463,6 +464,9 @@ def validate_config_sources(
             backup named by an entry or an archive rule is defined, and that the
             report model of a definition is defined. Off to check a single file,
             whose models and backups may live in another file. Defaults to True.
+        evaluate (bool, optional): build the extractors, which evaluates the lambdas
+            and converters of the entries. False parses them without evaluating
+            anything (see maas_collector.rawdata.extractor.static). Defaults to True.
 
     Raises:
         ConfigValidationError: on the first source that cannot be loaded
@@ -498,7 +502,7 @@ def validate_config_sources(
 
                 for configuration_class in config_classes_for(meta):
                     build_collector_configuration(
-                        meta, configuration_class, register=False
+                        meta, configuration_class, register=False, evaluate=evaluate
                     )
 
                 if isinstance(meta.get("model"), dict):

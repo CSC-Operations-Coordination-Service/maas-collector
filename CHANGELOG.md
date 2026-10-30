@@ -31,6 +31,16 @@
   the files of a service must define every backup named by an entry (enabled or not)
   or an archive rule, and every `report_model` (`ConfigIntegrityError`).
 
+### Safe configuration validation
+
+- `validate_config_sources(..., evaluate=False)` validates a configuration without
+  evaluating any lambda or converter: each `python` string is parsed and must be a
+  lambda without default argument, and the class and the argument names of an
+  extractor are checked against its signature (`rawdata/extractor/static.py`).
+  `build_collector_configuration` takes the same `evaluate` flag, and
+  `ConfigStore(client, index, evaluate=False)` validates its publications and
+  rollbacks that way, for a service that must not execute what it validates.
+
 ## Version 3.13.0
 
 ### Operator image

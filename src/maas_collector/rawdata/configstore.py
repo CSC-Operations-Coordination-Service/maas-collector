@@ -154,10 +154,22 @@ def content_names(content: dict) -> tuple[list, list]:
 class ConfigStore:
     """Writer and reader of the configuration documents"""
 
-    def __init__(self, client, index: str = DEFAULT_CONFIG_INDEX):
+    def __init__(
+        self, client, index: str = DEFAULT_CONFIG_INDEX, evaluate: bool = True
+    ):
+        """
+        Args:
+            client: OpenSearch client
+            index (str, optional): index of the configuration documents
+            evaluate (bool, optional): False validates publications and rollbacks
+                without evaluating any lambda or converter, for a service that must
+                not execute what it validates. Defaults to True.
+        """
         self.client = client
 
         self.index = index
+
+        self.evaluate = evaluate
 
         self._index_ready = False
 
@@ -272,7 +284,10 @@ class ConfigStore:
 
         if not deleted:
             validate_config_sources(
-                [ConfigSource(path, content)], config_classes_for, resolve_models=False
+                [ConfigSource(path, content)],
+                config_classes_for,
+                resolve_models=False,
+                evaluate=self.evaluate,
             )
 
         services = sorted(set(services))

@@ -107,6 +107,26 @@ seconds have passed since the last check. A change is picked up within about
 - With `CONFIG_REFRESH_PERIOD=0`, the collector never checks: a change applies at
   the next restart.
 
+## Validation
+
+`validate_config_sources` checks that the collectors can load a set of files. It
+has two modes:
+
+- **Evaluating** (`evaluate=True`, the default, the mode of the collectors and of the
+  administration CLI): every extractor is built, so the `python` lambdas and the
+  converters of the entries are evaluated.
+- **Static** (`evaluate=False`): nothing is evaluated. Each `python` and `rpython`
+  string, at any depth of the extractor `args` and `converter_map`, is parsed with
+  `ast.parse(..., mode="eval")` and must be a lambda without default argument; the
+  class of an extractor and the names of its arguments are checked against its
+  signature without building it
+  (`maas_collector.rawdata.extractor.static`). Lambdas are evaluated only where they
+  run, in the collectors and in the replay child.
+
+A service that must not execute what it validates, like the backend, uses
+`ConfigStore(client, index, evaluate=False)`: `publish` and `rollback` then validate
+statically.
+
 ## Administration CLI
 
 Edits go through the administration CLI, which checks every version before
