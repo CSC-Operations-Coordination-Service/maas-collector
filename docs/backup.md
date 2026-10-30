@@ -62,14 +62,46 @@ A single file is uploaded to **every** bucket of `buckets`.
         "calendar_tree": true,
         "enable_gzip": false,
         "s3_endpoint_url": "http://minio:9000",
-        "s3_access_key": "minioadmin",
-        "s3_secret_key": "minioadmin",
         "s3_signature_version": "s3v4",
         "s3_region": "us-east-1",
-        "buckets": ["bucket-a"]
+        "buckets": ["bucket-a"],
+        "credentials": "backup-minio"
     }
 }
 ```
+
+`credentials` names the credential entry that holds the S3 keys, see "Credentials".
+
+### Credentials
+
+The S3 keys are never in a backup block, named or inline: `s3_access_key` and
+`s3_secret_key` are refused there. They live in a credential entry whose name starts
+with `backup-`, in the credential file or in the vault, like the credentials of an
+interface:
+
+```json
+{
+    "interfaces": [
+        {
+            "name": "backup-minio",
+            "s3_access_key": "<access key>",
+            "s3_secret_key": "<secret key>"
+        }
+    ]
+}
+```
+
+- The entry holds **exactly** `s3_access_key` and `s3_secret_key`. An entry holding
+  another field fails the backup at load, naming the field (never its value).
+- The collector reads the entry with the other credentials and refreshes it with them
+  (`CREDENTIAL_REFRESH_PERIOD`): a rotation reaches the next file backed up, without a
+  restart.
+- The keys are kept in the sensitive `backup_credentials` field of the configuration
+  and merged into a copy of the block only when the backup object is built. The
+  configuration is masked in the logs.
+- An entry that is missing, or that holds only one of the two keys, fails the backup
+  of the file (`Cannot backup` in the logs, and a failed file in a replay): the upload
+  never falls back on the ambient credentials of the container.
 
 ## SFTP
 

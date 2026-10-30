@@ -34,6 +34,14 @@
   when the collector loads, for every entry, enabled or not; an unknown name is a load
   error. The loader itself refuses `s3_access_key` and `s3_secret_key` in a backup
   block: a local file with them no longer loads, move them to a credential entry.
+- The S3 keys of a backup live in a credential entry named `backup-…` (in the
+  credential file or the vault), holding only `s3_access_key` and `s3_secret_key`; the
+  backup names it in `credentials`. The collector reads it with the other credentials,
+  refreshes it on rotation, keeps the keys in a sensitive field of the configuration
+  (masked in its representation) and merges them into a copy of the block when the
+  backup object is built. An entry with another field fails the backup at load, naming
+  the field; an entry missing or with one key only fails the backup of the file, never
+  an upload with the ambient credentials.
 
 ### Safe configuration validation
 

@@ -1,6 +1,7 @@
 """Data file collector 天気はいいです"""
 
 from collections.abc import Iterable
+import copy
 import dataclasses
 import datetime
 import fnmatch
@@ -19,7 +20,11 @@ from functools import cached_property
 
 from maas_collector.backup import instanciate_collector_backup
 from maas_collector.backup.backup import CollectorBackupConfiguration
-from maas_collector.backup.named import apply_named_backup, backup_definitions
+from maas_collector.backup.named import (
+    SECRET_FIELDS,
+    apply_named_backup,
+    backup_definitions,
+)
 from opensearchpy.helpers import parallel_bulk
 from opensearchpy.connection.connections import connections as es_connections
 
@@ -759,6 +764,37 @@ class FileCollector(CredentialMixin):
             self.action_iterator_errors = self._action_iterator.action_iterator_errors
             self._action_iterator = None
 
+    def build_backup_block(self, config) -> dict:
+        """the block of the backup object: a copy of the backup of the configuration
+        with the name of the backup and the S3 keys of its credential entry
+
+        Args:
+            config (FileCollectorConfiguration): ingestion config
+
+        Raises:
+            ValueError: the backup names a credential entry and either key is
+                missing, so that an upload never falls back on the ambient
+                credentials of the container
+
+        Returns:
+            dict: the block, for instanciate_collector_backup
+        """
+        block = copy.deepcopy(config.backup)
+
+        block["backup_name"] = config.backup_name
+
+        block.update(config.backup_credentials)
+
+        if config.backup_credentials_entry:
+            for field in SECRET_FIELDS:
+                if not block.get(field):
+                    raise ValueError(
+                        f"credential entry {config.backup_credentials_entry} of"
+                        f" backup {config.backup_name or '(inline)'} has no {field}"
+                    )
+
+        return block
+
     def backup_and_report(
         self, config, path: str, report_name: str = "", report_folder: str = ""
     ) -> None:
@@ -778,9 +814,7 @@ class FileCollector(CredentialMixin):
         reports = []
 
         try:
-            self._backup = instanciate_collector_backup(
-                {**config.backup, "backup_name": config.backup_name}
-            )
+            self._backup = instanciate_collector_backup(self.build_backup_block(config))
 
             reports.extend(self._backup.backup_file(config, path))
 
