@@ -131,6 +131,27 @@ is `{"backups": [definition]}`, tagged with every service that may use it.
 
 The rules are checked by `maas_collector.backup.named`.
 
+### Using a named backup
+
+An entry names the backup it uses:
+
+```json
+{
+    "...": "...",
+    "backup": "archive-a"
+}
+```
+
+The name is resolved when the collector loads, for **every** entry, enabled or not,
+against the `backups` of the files the service loads. An unknown name is a load error,
+and so is a name defined by two files. The entry then backs up with the definition,
+without its `name`, `description` and `credentials`, and the reports carry the
+`backup_name`.
+
+An inline block (an object, as in the examples below) stays accepted, without secret
+fields: a local file with `s3_access_key` or `s3_secret_key` in a backup block no
+longer loads, move them to a credential entry.
+
 ## Backup reports
 
 A transfer that is not reported is invisible: a failed upload is logged as

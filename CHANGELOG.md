@@ -30,6 +30,10 @@
   use the same backup as its file `backup` and in its `archive` rule. Checked together,
   the files of a service must define every backup named by an entry (enabled or not)
   or an archive rule, and every `report_model` (`ConfigIntegrityError`).
+- A collector entry names its backup with `"backup": "<name>"`. The name is resolved
+  when the collector loads, for every entry, enabled or not; an unknown name is a load
+  error. The loader itself refuses `s3_access_key` and `s3_secret_key` in a backup
+  block: a local file with them no longer loads, move them to a credential entry.
 
 ### Safe configuration validation
 

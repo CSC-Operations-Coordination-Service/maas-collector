@@ -258,3 +258,36 @@ def destination_changes(old: dict, new: dict) -> typing.List[str]:
         changes.append("buckets")
 
     return changes
+
+
+def apply_named_backup(config, definitions: typing.Dict[str, dict]) -> None:
+    """resolve the `backup` of a collector configuration, in place
+
+    The backup of the configuration becomes the block for
+    instanciate_collector_backup, `backup_name` the name it was resolved from (empty
+    for an inline block) and `backup_credentials_entry` the credential entry that
+    holds the S3 keys.
+
+    Args:
+        config (FileCollectorConfiguration): the configuration, enabled or not
+        definitions (dict[str, dict]): the definitions the service loads
+
+    Raises:
+        ValueError: unknown name, or an inline block with a secret field
+    """
+    if not config.backup:
+        return
+
+    reference = config.backup
+
+    try:
+        block, entry = resolve_backup(reference, definitions)
+    except KeyError as error:
+        raise ValueError(
+            f"interface {config.interface_name}: backup {reference} is not defined"
+            " by any file the service loads"
+        ) from error
+
+    config.backup = block
+    config.backup_name = reference if isinstance(reference, str) else ""
+    config.backup_credentials_entry = entry or ""

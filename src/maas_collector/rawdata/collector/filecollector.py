@@ -19,6 +19,7 @@ from functools import cached_property
 
 from maas_collector.backup import instanciate_collector_backup
 from maas_collector.backup.backup import CollectorBackupConfiguration
+from maas_collector.backup.named import apply_named_backup, backup_definitions
 from opensearchpy.helpers import parallel_bulk
 from opensearchpy.connection.connections import connections as es_connections
 
@@ -176,6 +177,22 @@ class FileCollectorConfiguration:
     JSON directly: init=False makes a configuration file trying to set it fail
     loudly instead of quietly bypassing resolution.
     """
+
+    backup_name: str = dataclasses.field(default="", init=False)
+    """name of the named backup `backup` was resolved from, empty for an inline block.
+
+    Resolved by load_config, never read from the JSON.
+    """
+
+    backup_credentials_entry: str = dataclasses.field(default="", init=False)
+    """name of the credential entry holding the S3 keys of the backup, empty when
+    there is none. Resolved by load_config, never read from the JSON."""
+
+    backup_credentials: dict = dataclasses.field(
+        default_factory=dict, init=False, metadata={"sensitive": True}
+    )
+    """S3 keys of the backup, copied from the credential entry by CredentialMixin.
+    Kept out of `backup` so that the block can be logged; masked in the repr."""
 
     @cached_property
     def name(self) -> str:
@@ -391,8 +408,12 @@ class FileCollector(CredentialMixin):
 
         sources = self.config_provider.load()
 
+        built = []
+
         for source in sources:
             for config in self.get_configs(source):
+                built.append(config)
+
                 if config.enabled:
                     self.configs.append(config)
                 else:
@@ -400,6 +421,13 @@ class FileCollector(CredentialMixin):
                     self.disabled_interface_names.add(config.interface_name)
 
             self._messenger.load_config_dict(source.content, source.name)
+
+        # resolve the backup names of every entry, enabled or not, before the report
+        # models below read the resolved blocks
+        definitions = backup_definitions(source.content for source in sources)
+
+        for config in built:
+            apply_named_backup(config, definitions)
 
         self.config_sources = sources
         self._config_fingerprint = self.config_provider.fingerprint(sources)
@@ -750,7 +778,9 @@ class FileCollector(CredentialMixin):
         reports = []
 
         try:
-            self._backup = instanciate_collector_backup(config.backup)
+            self._backup = instanciate_collector_backup(
+                {**config.backup, "backup_name": config.backup_name}
+            )
 
             reports.extend(self._backup.backup_file(config, path))
 
