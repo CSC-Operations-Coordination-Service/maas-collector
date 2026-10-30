@@ -147,3 +147,10 @@ def test_child_environment_gives_the_lane_its_own_instance_id():
 def test_child_environment_without_instance_id_uses_the_host_name():
     env = child_environment({"PATH": "/bin"}, "short")
     assert env["MAAS_INSTANCE_ID"] == f"{socket.gethostname()}-replay-short"
+
+
+def test_a_worker_without_custom_lanes_finds_no_such_interface(store, fake_opensearch):
+    """what a worker that does not know custom requests does with the name"""
+    add(fake_opensearch, "a.json", [entry()])
+    with pytest.raises(ReplayNotPossible, match="not found"):
+        find_entry(store, "odata", "ITF_A@custom")

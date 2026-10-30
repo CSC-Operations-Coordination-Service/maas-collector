@@ -33,6 +33,19 @@ def req(days=1, lane="short", name="ITF_A", operation_id="op1"):
     )
 
 
+def custom_req(lane="short", **fields):
+    """a request for ITF_A@custom, with the fields of a custom recollect"""
+    return ReplayRequest(
+        "op1",
+        "ITF_A@custom",
+        START,
+        START + datetime.timedelta(days=1),
+        "bob",
+        lane,
+        extra={"interface": "ITF_A", **fields},
+    )
+
+
 def entry(name="ITF_A", cls="ODataCollectorConfiguration", **extra):
     return {"class": cls, "interface_name": name, **extra}
 
@@ -88,6 +101,8 @@ def lane(store, runner, tmp_path, recorder=None, name="short", port=18081):
     lanes = [
         Lane("short", "q-short", "k.short", LaneTimeout(base=100)),
         Lane("long", "q-long", "k.long", LaneTimeout(base=100, per_day=50)),
+        Lane("custom-short", "q-cshort", "k.cshort", LaneTimeout(base=100)),
+        Lane("custom-long", "q-clong", "k.clong", LaneTimeout(base=100, per_day=50)),
     ]
     worker = ReplayWorker(
         lambda: None,
@@ -145,6 +160,27 @@ def test_each_lane_has_its_own_health_check_port(odata_store, tmp_path):
     assert ports == {"short": "18081", "long": "18082"}
 
 
+@pytest.mark.parametrize(
+    "name, port",
+    [
+        ("short", "18081"),
+        ("long", "18082"),
+        ("custom-short", "18081"),
+        ("custom-long", "18082"),
+    ],
+)
+def test_a_custom_lane_has_the_health_check_port_of_its_slot(
+    odata_store, tmp_path, name, port
+):
+    runner = FakeRunner()
+    replay_lane, _ = lane(odata_store, runner, tmp_path, name=name)
+    replay_lane.handle(
+        req() if not name.startswith("custom") else custom_req(configuration="x")
+    )
+    command = runner.commands[0][0]
+    assert command[command.index("--healthcheck-port") + 1] == port
+
+
 def test_handle_takes_the_timeout_of_its_own_lane(odata_store, tmp_path):
     """the lane of the request is the backend's label: the queue decides"""
     runner = FakeRunner()
@@ -158,6 +194,96 @@ def test_the_child_gets_its_lane_in_its_instance_id(odata_store, tmp_path):
     replay_lane, _ = lane(odata_store, runner, tmp_path, name="long")
     replay_lane.handle(req())
     assert runner.commands[0][1]["MAAS_INSTANCE_ID"].endswith("-replay-long")
+
+
+def test_the_child_of_a_custom_lane_gets_the_engine_lane_in_its_instance_id(
+    odata_store, tmp_path
+):
+    runner = FakeRunner()
+    replay_lane, _ = lane(odata_store, runner, tmp_path, name="custom-long")
+    replay_lane.handle(custom_req(configuration="x"))
+    assert runner.commands[0][1]["MAAS_INSTANCE_ID"].endswith("-replay-custom-long")
+
+
+def test_a_custom_request_on_a_custom_lane_runs_the_real_interface(
+    odata_store, tmp_path
+):
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(configuration="named@2"))
+    command = runner.commands[0][0]
+    assert command[command.index("--replay-interface-name") + 1] == "ITF_A"
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+
+
+@pytest.mark.parametrize(
+    "fields", [{"overrides": {}}, {"configuration": "x"}, {"archive": {}}]
+)
+def test_a_request_with_one_field_set_is_custom(odata_store, tmp_path, fields):
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(**fields))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert len(runner.commands) == 1
+
+
+@pytest.mark.parametrize("name", ["short", "long"])
+def test_a_custom_request_on_a_plain_lane_is_refused(
+    odata_store, tmp_path, name, caplog
+):
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name=name)
+    replay_lane.handle(custom_req(configuration="x"))
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "plain lane" in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
+    # the engine's refusal: no traceback is logged
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+@pytest.mark.parametrize("name", ["short", "custom-short"])
+@pytest.mark.parametrize(
+    "extra", [{"overrides": {"product_per_page": 5}}, {"archive": {"backup": "a"}}]
+)
+def test_custom_fields_without_the_custom_name_are_refused_on_any_lane(
+    odata_store, tmp_path, name, extra
+):
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name=name)
+    request = ReplayRequest(
+        "op1", "ITF_A", START, START + datetime.timedelta(days=1), "bob", "short", extra
+    )
+    replay_lane.handle(request)
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "@custom" in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "name, extra, word",
+    [
+        ("ITF_A@custom", {"interface": "ITF_A"}, "overrides"),
+        ("ITF_A@custom", {"interface": "ITF_A", "configuration": ""}, "overrides"),
+        ("ITF_A@custom", {"configuration": "x"}, "interface"),
+        ("ITF_A@custom", {"interface": "OTHER", "configuration": "x"}, "interface"),
+        ("A@b@custom", {"interface": "A@b", "configuration": "x"}, "@"),
+    ],
+)
+def test_a_malformed_custom_request_is_refused(
+    odata_store, tmp_path, name, extra, word
+):
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    request = ReplayRequest(
+        "op1", name, START, START + datetime.timedelta(days=1), "bob", "short", extra
+    )
+    replay_lane.handle(request)
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert word in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
 
 
 def test_handle_records_failed_when_the_sync_skipped_a_file(
@@ -293,7 +419,9 @@ def test_describe_failure_names_the_count_and_the_backup():
 
 def test_describe_failure_finds_the_line_among_later_output():
     # Review Focus 3
-    tail = "backup failed: 3 files to archive-a\nINFO exiting\nWARNING closing connection"
+    tail = (
+        "backup failed: 3 files to archive-a\nINFO exiting\nWARNING closing connection"
+    )
 
     assert CollectorReplayHandler.describe_failure(
         BACKUP_FAILED_EXIT_CODE, tail
