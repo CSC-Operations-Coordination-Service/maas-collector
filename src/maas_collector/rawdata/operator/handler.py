@@ -23,10 +23,19 @@ from maas_collector.rawdata.collector.filecollector import (
     BACKUP_FAILURE_LINE,
     REPLAY_FAILED_EXIT_CODE,
 )
+from maas_collector.rawdata.configprovider import (
+    ConfigValidationError,
+    FileConfigProvider,
+    validate_config_sources,
+)
 from maas_collector.rawdata.configstore import ConfigStore
-from maas_collector.rawdata.configsync import sync_configs
+from maas_collector.rawdata.configsync import serialize, sync_configs
+from maas_collector.rawdata.implementation import (
+    get_collector_class_by_config_classname,
+)
 from maas_collector.rawdata.operator.contract import CUSTOM_SUFFIX
 from maas_collector.rawdata.operator.lanes import accepts_custom, slot_of
+from maas_collector.rawdata.operator.overrides import OverrideRefused, merge_overrides
 from maas_collector.rawdata.operator.replay import (
     REPLAY_MODULES,
     ReplayNotPossible,
@@ -97,6 +106,33 @@ def custom_part(request, lane: str) -> CustomPart | None:
     return CustomPart(real, overrides, configuration, archive)
 
 
+def entry_in_copy(service_dir: str, interface_name: str) -> tuple[str, dict, int]:
+    """The one enabled entry of an interface in a copy of the configuration
+
+    Returns:
+        (path of the file, its content, index of the entry in its `collectors`)
+
+    Raises:
+        ReplayNotPossible: not exactly one enabled entry has this name across the
+            files of the copy (a disabled twin is left alone)
+    """
+    found = []
+    for source in FileConfigProvider(config_dir=service_dir).load():
+        collectors = source.content.get("collectors", [])
+        for index, meta in enumerate(collectors):
+            if (
+                meta.get("interface_name") == interface_name
+                and meta.get("enabled", True) is not False
+            ):
+                found.append((source.name, source.content, index))
+    if len(found) != 1:
+        raise ReplayNotPossible(
+            f"{len(found)} enabled entries are named {interface_name} in the "
+            "configuration of the service, a custom recollect needs exactly one"
+        )
+    return found[0]
+
+
 @dataclass
 class Prepared:
     """what `prepare` made: the copy of the configuration and the collector to run"""
@@ -121,6 +157,7 @@ class CollectorReplayHandler:
         healthcheck_port: int = 18081,
         replay_retry: int = 3,
         environ: Mapping[str, str] | None = None,
+        credential_provider=None,
     ):
         self.store = store
         self.service = service
@@ -130,6 +167,9 @@ class CollectorReplayHandler:
         self.healthcheck_port = healthcheck_port
         self.replay_retry = replay_retry
         self.environ = environ
+        # its own instance, never the checker's: a load rewrites `unreadable`, which
+        # the checker reads after each of its own loads
+        self.credential_provider = credential_provider
         # one lock per plain lane, shared by the custom lane beside it: a service never
         # runs more children than it has plain lanes
         self._slots = {name: threading.Lock() for name in self.lanes}
@@ -158,13 +198,45 @@ class CollectorReplayHandler:
                 raise ReplayNotPossible(
                     "configuration files the copy skipped: " + ", ".join(synced.skipped)
                 )
-        except ReplayNotPossible as error:
+            if part:
+                self._customize(part, os.path.join(copy, self.service), entry["class"])
+        except (ReplayNotPossible, OverrideRefused, ConfigValidationError) as error:
             self._abandon(copy, slot)
             raise EngineReplayNotPossible(str(error)) from error
         except BaseException:
             self._abandon(copy, slot)
             raise
         return Prepared(copy, REPLAY_MODULES[entry["class"]], interface_name, slot=slot)
+
+    def _customize(self, part: CustomPart, service_dir: str, class_name: str) -> None:
+        """Apply the overrides of a custom request to the copy, then validate the copy
+
+        Nothing is evaluated: the copy is validated statically, the lambdas of its
+        extractors are only parsed.
+        """
+        path, content, index = entry_in_copy(service_dir, part.interface_name)
+        overrides = part.overrides or {}
+        name = overrides.get("interface_credentials")
+        if name and self.credential_provider is not None:
+            if name not in self.credential_provider.load([name]):
+                raise ReplayNotPossible(
+                    f"interface_credentials: no credential entry {name} for "
+                    f"service {self.service}"
+                )
+        content["collectors"][index] = merge_overrides(
+            class_name, content["collectors"][index], overrides
+        )
+        with open(path, "wb") as conf_fd:
+            conf_fd.write(serialize(content))
+        configuration_class = get_collector_class_by_config_classname(
+            class_name
+        ).CONFIG_CLASS
+        validate_config_sources(
+            FileConfigProvider(config_dir=service_dir).load(),
+            lambda _meta: [configuration_class],
+            resolve_models=True,
+            evaluate=False,
+        )
 
     @staticmethod
     def _abandon(copy: "str | None", slot: "threading.Lock") -> None:

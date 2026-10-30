@@ -1,3 +1,4 @@
+import builtins
 import copy
 import dataclasses
 import datetime
@@ -48,8 +49,25 @@ def custom_req(lane="short", **fields):
     )
 
 
+WINDOW = (
+    "PublicationDate ge {publication_start_date} and "
+    "PublicationDate le {publication_end_date}"
+)
+CUSTOM = {
+    "odata_query_filter": WINDOW + " and contains(Name,'TYPE_A')",
+    "download_file_pattern": ["*.EOF*"],
+}
+
+
 def entry(name="ITF_A", cls="ODataCollectorConfiguration", **extra):
-    return {"class": cls, "interface_name": name, **extra}
+    # the copy is validated with the class of its entries, which need these keys
+    return {
+        "class": cls,
+        "interface_name": name,
+        "routing_key": "k",
+        "id_field": "id",
+        **extra,
+    }
 
 
 @pytest.fixture
@@ -87,17 +105,34 @@ class FakeRunner:
     def run(self, command, env, timeout, progress, progress_interval=30):
         self.commands.append((command, env, timeout))
         self.copy = command[command.index("-d") + 1].split(os.sep)[-2]
+        conf_dir = command[command.index("-d") + 1]
         self.conf_files = sorted(
-            name
-            for name in os.listdir(command[command.index("-d") + 1])
-            if not name.startswith(".")
+            name for name in os.listdir(conf_dir) if not name.startswith(".")
         )
+        self.conf = {}
+        for name in self.conf_files:
+            with open(os.path.join(conf_dir, name), encoding="UTF-8") as conf_fd:
+                self.conf[name] = json.load(conf_fd)
         if self.boom:
             raise self.boom
         return self.code, self.tail
 
 
-def make_worker(store, tmp_path, recorder, port=18081):
+class FakeProvider:
+    """a credential provider that knows some entries"""
+
+    def __init__(self, *known):
+        self.known = known
+        self.loaded = []
+
+    def load(self, names):
+        self.loaded.append(list(names))
+        return {name: {} for name in names if name in self.known}
+
+
+def make_worker(
+    store, tmp_path, recorder, port=18081, service="odata", credential_provider=None
+):
     """the replay worker of maas-engine with the collector's handler, four lanes"""
     lanes = [
         Lane("short", "q-short", "k.short", LaneTimeout(base=100)),
@@ -108,24 +143,43 @@ def make_worker(store, tmp_path, recorder, port=18081):
     return ReplayWorker(
         lambda: None,
         recorder,
-        CollectorReplayHandler(store, "odata", ("short", "long"), port, 3),
+        CollectorReplayHandler(
+            store,
+            service,
+            ("short", "long"),
+            port,
+            3,
+            credential_provider=credential_provider,
+        ),
         lanes,
         kombu.Exchange("test"),
         str(tmp_path),
     )
 
 
-def lane(store, runner, tmp_path, recorder=None, name="short", port=18081):
+def lane(
+    store,
+    runner,
+    tmp_path,
+    recorder=None,
+    name="short",
+    port=18081,
+    service="odata",
+    credential_provider=None,
+):
     """the replay worker of maas-engine with the collector's handler, and its lane"""
     recorder = recorder or FakeRecorder()
-    worker = make_worker(store, tmp_path, recorder, port)
+    worker = make_worker(store, tmp_path, recorder, port, service, credential_provider)
     worker.runners[name] = runner
     chosen = worker.lanes[name]
     return (
         type(
             "Lane",
             (),
-            {"handle": lambda self, request: worker.handle(chosen, request)},
+            {
+                "handle": lambda self, request: worker.handle(chosen, request),
+                "worker": worker,
+            },
         )(),
         recorder,
     )
@@ -560,3 +614,187 @@ def test_a_failed_request_frees_the_slot(odata_store, tmp_path, monkeypatch):
         assert len(runner.commands) == 1
     assert [c for c in recorder.calls if c[1] == FAILED and c[0].startswith("f")] != []
     assert os.listdir(tmp_path) == []
+
+
+def slot_is_free(replay_lane, name="short"):
+    free = replay_lane.worker.handler._slots[name].acquire(blocking=False)
+    if free:
+        replay_lane.worker.handler._slots[name].release()
+    return free
+
+
+def test_the_overrides_are_applied_to_the_copy_only(store, fake_opensearch, tmp_path):
+    add(
+        fake_opensearch,
+        "a.json",
+        [
+            entry(
+                odata_query_filter=WINDOW,
+                download_file_pattern=["*"],
+                product_per_page=1000,
+            ),
+            entry("OTHER"),
+        ],
+    )
+    runner = FakeRunner()
+    replay_lane, recorder = lane(store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(overrides=CUSTOM))
+    [itf, other] = runner.conf["a.json"]["collectors"]
+    assert (
+        itf["odata_query_filter"],
+        itf["download_file_pattern"],
+        itf["product_per_page"],
+    ) == (CUSTOM["odata_query_filter"], ["*.EOF*"], 1000)
+    assert other == entry("OTHER")
+    # the index is untouched
+    stored = store.get("a.json")["content"]["collectors"][0]
+    assert stored["download_file_pattern"] == ["*"]
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+
+
+@pytest.mark.parametrize(
+    "overrides, word",
+    [
+        ({"odata_product_url": "https://other.example"}, "odata_product_url"),
+        ({"odata_query_filter": "contains(Name,'x')"}, "ge"),
+        ({"odata_query_filter": WINDOW + " or Name eq 'x'"}, "or"),
+        ({"product_per_page": 5000}, "product_per_page"),
+        ({"interface_credentials": "missing"}, "credential"),
+    ],
+)
+def test_a_refused_override_fails_the_record_and_leaves_nothing(
+    odata_store, tmp_path, overrides, word
+):
+    runner = FakeRunner()
+    replay_lane, recorder = lane(
+        odata_store,
+        runner,
+        tmp_path,
+        name="custom-short",
+        credential_provider=FakeProvider("cred-b"),
+    )
+    replay_lane.handle(custom_req(overrides=overrides))
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert word in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
+    assert slot_is_free(replay_lane)
+
+
+def test_the_interface_credentials_override_must_exist_for_the_service(
+    odata_store, tmp_path
+):
+    provider = FakeProvider("cred-b")
+    runner = FakeRunner()
+    replay_lane, recorder = lane(
+        odata_store,
+        runner,
+        tmp_path,
+        name="custom-short",
+        credential_provider=provider,
+    )
+    replay_lane.handle(custom_req(overrides={"interface_credentials": "cred-b"}))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert runner.conf["a.json"]["collectors"][0]["interface_credentials"] == "cred-b"
+    assert provider.loaded == [["cred-b"]]
+    # without a provider the name is taken as it is
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(overrides={"interface_credentials": "any"}))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+
+
+def test_a_jira_entry_takes_a_jql_override(store, fake_opensearch, tmp_path):
+    add(
+        fake_opensearch,
+        "j.json",
+        [
+            entry(
+                "ITF_A",
+                cls="JiraExtendedCollectorConfiguration",
+                jql_query="updated > {date_criteria}",
+            )
+        ],
+        services=("jirax",),
+    )
+    runner = FakeRunner()
+    replay_lane, recorder = lane(
+        store, runner, tmp_path, name="custom-short", service="jirax"
+    )
+    jql = "project = X AND updated > {date_criteria}"
+    replay_lane.handle(custom_req(overrides={"jql_query": jql}))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert runner.conf["j.json"]["collectors"][0]["jql_query"] == jql
+    assert runner.commands[0][0][2] == "maas_collector.rawdata.cli.jirax"
+
+
+NO_LAMBDA_EXTRACTOR = {
+    "class": "XMLExtractor",
+    "args": {
+        "attr_map": {"a": "b"},
+        "converter_map": {"a": {"type": "python", "python": "lambda x: x"}},
+    },
+}
+
+
+def test_prepare_never_evaluates_the_configuration(
+    store, fake_opensearch, tmp_path, monkeypatch
+):
+    add(fake_opensearch, "a.json", [entry(extractor=NO_LAMBDA_EXTRACTOR)])
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("eval called")
+
+    monkeypatch.setattr(builtins, "eval", boom)
+    runner = FakeRunner()
+    replay_lane, recorder = lane(store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(overrides=CUSTOM))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+
+
+def test_a_lambda_that_is_not_a_plain_lambda_fails_the_replay_before_any_child(
+    store, fake_opensearch, tmp_path
+):
+    extractor = copy.deepcopy(NO_LAMBDA_EXTRACTOR)
+    extractor["args"]["converter_map"]["a"]["python"] = "lambda x=1: x"
+    add(fake_opensearch, "a.json", [entry(extractor=extractor)])
+    runner = FakeRunner()
+    replay_lane, recorder = lane(store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(overrides=CUSTOM))
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "lambda" in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
+    assert slot_is_free(replay_lane)
+
+
+def test_two_enabled_entries_of_one_name_are_refused(store, fake_opensearch, tmp_path):
+    add(fake_opensearch, "a.json", [entry()])
+    add(fake_opensearch, "b.json", [entry()])
+    runner = FakeRunner()
+    replay_lane, recorder = lane(store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(overrides=CUSTOM))
+    assert recorder.calls == [("op1", RUNNING), ("op1", FAILED)]
+    assert "2" in recorder.details and "ITF_A" in recorder.details
+    assert runner.commands == []
+    assert os.listdir(tmp_path) == []
+    assert slot_is_free(replay_lane)
+
+
+def test_a_disabled_twin_is_left_alone(store, fake_opensearch, tmp_path):
+    add(fake_opensearch, "a.json", [entry()])
+    add(fake_opensearch, "b.json", [entry(enabled=False)])
+    runner = FakeRunner()
+    replay_lane, recorder = lane(store, runner, tmp_path, name="custom-short")
+    replay_lane.handle(custom_req(overrides=CUSTOM))
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert runner.conf["b.json"]["collectors"] == [entry(enabled=False)]
+    assert runner.conf["a.json"]["collectors"][0]["download_file_pattern"] == ["*.EOF*"]
+
+
+def test_a_plain_request_is_not_validated_or_changed(odata_store, tmp_path):
+    runner = FakeRunner()
+    replay_lane, recorder = lane(odata_store, runner, tmp_path)
+    replay_lane.handle(req())
+    assert recorder.calls == [("op1", RUNNING), ("op1", DONE, 0)]
+    assert runner.conf == {"a.json": {"collectors": [entry()]}}
