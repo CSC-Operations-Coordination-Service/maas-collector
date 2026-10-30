@@ -7,6 +7,11 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+from maas_collector.rawdata.collector.http.authentication import (
+    AuthenticationError,
+    OAuth,
+    SessionAuth,
+)
 from maas_collector.rawdata.transfer import download as download_module
 from maas_collector.rawdata.transfer.download import (
     Downloaded,
@@ -349,3 +354,127 @@ def test_with_retries_does_not_retry_permanent_errors_nor_a_stop(error):
     with pytest.raises(type(error)):
         with_retries(action, 3, 5.0, sleeps.append)
     assert action.calls == 1 and sleeps == []
+
+
+class FailingAuthentication(FakeAuthentication):
+    """an authentication whose first headers fail with the scripted errors"""
+
+    def __init__(self, *errors):
+        super().__init__()
+        self.errors = list(errors)
+
+    def get_headers(self):
+        error = self.errors.pop(0) if self.errors else None
+        if error:
+            raise error
+        return super().get_headers()
+
+
+def make_failing(*errors, responses=()):
+    session = FakeSession(*responses)
+    downloader = ProductDownloader(
+        CONFIG, RULE, session=session, authentication=FailingAuthentication(*errors)
+    )
+    return downloader, session
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.ConnectionError("token server down"),
+        requests.Timeout("token server slow"),
+        AuthenticationError("Error querying token", 500),
+        AuthenticationError("Error querying token", 503),
+        AuthenticationError("Error querying token", 429),
+    ],
+)
+def test_a_token_server_failure_is_transient(error, tmp_path):
+    downloader, session = make_failing(error)
+    with pytest.raises(TransientTransferError):
+        downloader.download(PRODUCT, str(tmp_path))
+    assert session.calls == []
+
+
+def test_a_token_server_that_recovers_ends_ok_with_the_retries(tmp_path):
+    downloader, _ = make_failing(
+        AuthenticationError("Error querying token", 502), responses=[FakeResponse()]
+    )
+    result = with_retries(
+        lambda: downloader.download(PRODUCT, str(tmp_path)), 3, 0.0, lambda _s: None
+    )
+    assert result.size == 3000
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_a_token_refused_by_the_token_server_is_not_retried(status, tmp_path):
+    downloader, _ = make_failing(AuthenticationError("Error querying token", status))
+    with pytest.raises(AuthenticationError) as error:
+        downloader.download(PRODUCT, str(tmp_path))
+    assert not isinstance(error.value, TransientTransferError)
+
+
+def test_a_failure_of_the_new_token_after_a_401_is_transient(tmp_path):
+    downloader, _ = make_failing(
+        None, requests.ConnectionError("token server down"), responses=[FakeResponse(401)]
+    )
+    with pytest.raises(TransientTransferError, match="token"):
+        downloader.download(PRODUCT, str(tmp_path))
+
+
+def test_a_login_that_fails_while_the_authentication_is_built_is_transient(
+    tmp_path, monkeypatch
+):
+    def build(*_args):
+        raise AuthenticationError("Error login", 503)
+
+    monkeypatch.setattr(download_module, "build_authentication", build)
+    session = FakeSession()
+    downloader = ProductDownloader(CONFIG, RULE, session=session)
+    with pytest.raises(TransientTransferError):
+        downloader.download(PRODUCT, str(tmp_path))
+    assert session.calls == []
+
+
+class TokenServer:
+    def __init__(self, status):
+        self.status = status
+
+    def post(self, *_args, **_kwargs):
+        return SimpleNamespace(status_code=self.status, content=b"")
+
+
+def oauth_config():
+    return SimpleNamespace(
+        token_field_header="Authorization",
+        token="",
+        token_url="https://token.example",
+        oauth_basic_credential="",
+        client_id="",
+        client_secret="",
+        client_username="",
+        client_password="",
+        auth_timeout=1,
+        scope=None,
+        grant_type="client_credentials",
+    )
+
+
+@pytest.mark.parametrize("status", [401, 503])
+def test_the_token_error_keeps_the_status_and_stays_a_value_error(status):
+    oauth = OAuth(oauth_config(), TokenServer(status))
+    with pytest.raises(ValueError, match="Error querying token") as error:
+        oauth.get_headers()
+    assert error.value.status_code == status
+
+
+def test_the_login_error_keeps_the_status():
+    config = SimpleNamespace(
+        token_field_header="",
+        token="",
+        login_url="https://login.example",
+        auth_timeout=1,
+        credentials={},
+    )
+    with pytest.raises(AuthenticationError) as error:
+        SessionAuth(config, TokenServer(502))
+    assert error.value.status_code == 502

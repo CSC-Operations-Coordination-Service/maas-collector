@@ -17,7 +17,10 @@ from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
-from maas_collector.rawdata.collector.http.authentication import build_authentication
+from maas_collector.rawdata.collector.http.authentication import (
+    AuthenticationError,
+    build_authentication,
+)
 from maas_collector.rawdata.collector.httpmixin import HttpMixin
 from maas_collector.rawdata.transfer.rule import ArchiveRule
 
@@ -186,6 +189,24 @@ class ProductDownloader:
         if hasattr(authentication, "access_token_expiration_date"):
             authentication.access_token_expiration_date = datetime.datetime.now()
 
+    def headers(self) -> dict:
+        """The headers of a request to the configured host, token included
+
+        Raises:
+            TransientTransferError: the token server cannot be reached, or answers
+                a server error or a throttling. Any other refusal of it is raised
+                as it is: another try changes nothing.
+        """
+        try:
+            return {**self.authentication.get_headers(), "Accept-Encoding": "identity"}
+        except requests.RequestException as error:
+            raise TransientTransferError(f"cannot get a token: {error}") from error
+        except AuthenticationError as error:
+            status = error.status_code
+            if status >= 500 or status in TRANSIENT_STATUS:
+                raise TransientTransferError(f"cannot get a token: {error}") from error
+            raise
+
     def request(self, url: str, headers: dict):
         """One streamed GET, never following a redirect"""
         try:
@@ -208,18 +229,13 @@ class ProductDownloader:
         Raises:
             TransferError: transient or permanent, classified by the status
         """
-        headers = {**self.authentication.get_headers(), "Accept-Encoding": "identity"}
-        response = self.request(url, headers)
+        response = self.request(url, self.headers())
 
         if response.status_code in (401, 403):
             # the token may have expired: ask for another one, once
             response.close()
             self.expire_token()
-            headers = {
-                **self.authentication.get_headers(),
-                "Accept-Encoding": "identity",
-            }
-            response = self.request(url, headers)
+            response = self.request(url, self.headers())
 
         redirected = False
         followed = 0
