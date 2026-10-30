@@ -135,6 +135,16 @@
   and `object_key(interface_name, file_name, date)` builds the stable archive key
   `<interface_name>/[YYYY/MM/DD/]<file name>` from the UTC day of the product's
   publication date. Without a key the layout is unchanged.
+- After a run, the collectors hand the documents of an entry with an `archive` rule to a
+  transfer requester: live, the created and updated documents, in batches of 10; in
+  replay, every extracted document, unchanged ones included (their stored index is kept
+  by `ActionIterator.unmodified_documents`), without sending the product messages again.
+  A replay with an operation id writes a `REQUESTED` report per product first. A refused
+  live request is published again at the next loop; a replay that could not send
+  requests exits with status 69 and prints `transfer requests failed: <count>
+  documents` as its last line (status 1 and the backup line keep their rules: see
+  `docs/replay.md`). A collector with an archive rule needs `CONFIG_SERVICE`, or its
+  configuration does not load.
 
 ## Version 3.13.0
 

@@ -228,6 +228,7 @@ def test_the_cli_exits_with_the_backup_code_and_prints_the_line_last(
         collector = klass.return_value
         collector.replay_failures = []
         collector.backup_failures = {"archive-a": 3}
+        collector.transfer_failures = 0
         collector.backup_failure_line.return_value = (
             "backup failed: 3 files to archive-a"
         )
@@ -251,6 +252,7 @@ def test_replay_failure_wins_but_the_backup_line_is_printed(
         collector = klass.return_value
         collector.replay_failures = ["A"]
         collector.backup_failures = {"archive-a": 3}
+        collector.transfer_failures = 0
         collector.backup_failure_line.return_value = (
             "backup failed: 3 files to archive-a"
         )
@@ -271,6 +273,7 @@ def test_without_failures_the_cli_returns(cli, module, collector_class, capsys):
         collector = klass.return_value
         collector.replay_failures = []
         collector.backup_failures = {}
+        collector.transfer_failures = 0
 
         cli(REPLAY_ARGV)
 

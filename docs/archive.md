@@ -97,3 +97,29 @@ URLs. A template replaces `{id}` with the id, quoted (`'<id>'`, a quote doubled)
 `documents` holds several documents (the id and the index of each). `origin` is `live`,
 `recollect` or `download`; `operation_id` is empty for the live flow. Unknown fields are
 ignored on reading, and a malformed body is dropped by the stage.
+
+## Transfer requests
+
+After a run indexes documents through an entry with an `archive` rule, the collector
+hands the documents to its requester, which publishes requests of at most 10 documents:
+
+- **Live**: the documents created or updated by the run. A request the broker refuses
+  is kept (10 000 at most, then the oldest is dropped with a `CRITICAL` log: its
+  products show as gaps) and published again at the next loop.
+- **Replay** (a recollect): every document the run extracted, created, updated or
+  unchanged, because a recollect over products already indexed must still archive them.
+  The ordinary product messages are not sent again. A request that cannot be sent is
+  counted, never retried, and fails the replay.
+
+Requests are published mandatory and confirmed, so a request no queue accepts (no
+transfer stage of the service has declared its queue) is an error, not a silent loss.
+For an operation (a replay with an operation id), the collector first writes one
+`REQUESTED` report per product, a document that is not in the index included, then
+publishes the request: the operation knows what it sent.
+
+The collector needs its service to publish: set `CONFIG_SERVICE` (`--config-service`).
+An archive rule without it makes the configuration fail to load.
+
+A replay exits with status 69 (`TRANSFER_FAILED_EXIT_CODE`) when requests could not be
+sent, and prints `transfer requests failed: <count> documents` as its last line: see
+[replay](replay) for the order of the exit statuses.

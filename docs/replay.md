@@ -62,8 +62,18 @@ not end with an `OK` report for every destination (the "Cannot backup" path
 included) is counted, the replay collects everything it can, then exits and prints,
 as its last line, `backup failed: <count> files to <backup name>` (the names of the
 backups, sorted, when there are several; `(inline)` for a backup block that has no
-name). Status 1 wins when both happened, and the line is printed anyway. A live
-collector is not concerned: it logs the failed backups and goes on.
+name). A live collector is not concerned: it logs the failed backups and goes on.
+
+It exits with status 69 when the transfer requests of an [archive](archive) rule could
+not be sent for some documents (the request or its `REQUESTED` reports could not be
+published or stored): the replay collects everything it can, then prints, as its last
+line, `transfer requests failed: <count> documents`.
+
+When several things failed, every line is printed, the backup line first and the
+transfer line last, and one status is returned: 1 when an interface exhausted its
+retries or was refused, else 69 for the transfer requests, else 74 for the backups. A
+product whose request was never sent is missing from the archive, which is why it
+wins over a failed backup.
 
 ## Error messages
 
