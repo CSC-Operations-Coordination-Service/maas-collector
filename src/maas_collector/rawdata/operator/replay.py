@@ -122,6 +122,7 @@ def build_command(
         str(replay_retry),
         # one item: argparse would take an id starting with - for an option
         f"--replay-suffix={request.operation_id}",
+        f"--replay-requested-by={request.requested_by}",
     ]
 
 

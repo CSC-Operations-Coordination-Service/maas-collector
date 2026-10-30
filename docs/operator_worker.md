@@ -96,9 +96,10 @@ window twice. No AMQP connection is held while a replay runs.
 
 For each request, the lane copies the configuration of the service from the index to
 a temporary folder of the work folder, runs the odata or jirax collector on it as a
-child process in replay mode, with `--replay-suffix=<operation_id>` and
-`--replay-retry <OPERATOR_REPLAY_RETRY>`, then removes the folder. The child is killed
-at the lane timeout, even when it prints nothing.
+child process in replay mode, with `--replay-suffix=<operation_id>`,
+`--replay-requested-by=<requester>` and `--replay-retry <OPERATOR_REPLAY_RETRY>`,
+then removes the folder. The child is killed at the lane timeout, even when it prints
+nothing.
 
 The operation record, written by the backend in `maas-operation` before it publishes
 the request, is updated by id; the worker never creates a record:

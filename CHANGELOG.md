@@ -91,6 +91,9 @@
   window in a custom query, the archive choice (`backup`, `backup_version`,
   `duplicates`, `force`) and `merge_overrides`. The rules are in
   `docs/custom_recollect.md`.
+- The replay option `--replay-requested-by` (variable `REPLAY_REQUESTED_BY`, default
+  empty) tells the collector who asked for a replay (`ReplayArgs.requested_by`). The
+  operator worker passes the requester of the request to its child.
 
 ## Version 3.13.0
 

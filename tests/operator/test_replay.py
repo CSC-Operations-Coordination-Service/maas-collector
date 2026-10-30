@@ -10,6 +10,7 @@ from fakeopensearch import add_config_document
 from maas_collector.rawdata.cli.lib.args import common_parser, odata_parser
 from maas_collector.rawdata.configstore import ConfigStore
 from maas_collector.rawdata.operator.contract import ReplayRequest
+from maas_collector.rawdata.replay import ReplayArgs
 from maas_collector.rawdata.operator.replay import (
     ReplayNotPossible,
     build_command,
@@ -20,13 +21,13 @@ from maas_collector.rawdata.operator.replay import (
 START = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
 
 
-def req(days=1, lane="short", name="ITF_A", operation_id="op1"):
+def req(days=1, lane="short", name="ITF_A", operation_id="op1", requested_by="bob"):
     return ReplayRequest(
         operation_id,
         name,
         START,
         START + datetime.timedelta(days=days),
-        "bob",
+        requested_by,
         lane,
     )
 
@@ -68,6 +69,7 @@ def test_command_for_an_odata_entry():
         "--replay-retry",
         "3",
         "--replay-suffix=op1",
+        "--replay-requested-by=bob",
     ]
 
 
@@ -154,3 +156,21 @@ def test_a_worker_without_custom_lanes_finds_no_such_interface(store, fake_opens
     add(fake_opensearch, "a.json", [entry()])
     with pytest.raises(ReplayNotPossible, match="not found"):
         find_entry(store, "odata", "ITF_A@custom")
+
+
+def test_the_requester_reaches_the_child_arguments():
+    command = build_command("odata", "/c", req(), 18081, 3)
+    parser = argparse.ArgumentParser(parents=[common_parser(), odata_parser()])
+    namespace = parser.parse_args(command[3:])
+    assert (namespace.replay_suffix, namespace.replay_requested_by) == ("op1", "bob")
+
+
+def test_a_requester_starting_with_a_dash_stays_one_argument():
+    command = build_command("odata", "/c", req(requested_by="-x"), 18081, 3)
+    parser = argparse.ArgumentParser(parents=[common_parser(), odata_parser()])
+    assert parser.parse_args(command[3:]).replay_requested_by == "-x"
+
+
+def test_replay_args_default_requester_is_empty():
+    replay_args = ReplayArgs("ITF_A", "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z")
+    assert replay_args.requested_by == ""
