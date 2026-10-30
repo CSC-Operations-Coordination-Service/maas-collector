@@ -24,17 +24,20 @@ class CollectorBackupLocal(CollectorBackup):
         """override: a local backup has a single destination directory"""
         return [self.args.directory]
 
-    def backup_file_implementation(self, config, path) -> List[BackupReport]:
+    def backup_file_implementation(
+        self, config, path, key: str = None
+    ) -> List[BackupReport]:
         """Copy path under the configured directory.
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): explicit key, see CollectorBackup.backup_file
 
         Returns:
             list[BackupReport]: a single report
         """
-        local_file_path = "/".join(self.get_backup_path(config, path))
+        local_file_path = "/".join(self.get_backup_path(config, path, key=key))
 
         with self.report_transfer(
             config, path, self.args.directory, local_file_path

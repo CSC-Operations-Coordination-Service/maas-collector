@@ -130,6 +130,11 @@
   `maas-transfer-exchange` (topic, durable), routing key `maas.transfer.<service>`,
   queue `maas-transfer-<service>`, published mandatory and confirmed. The wire format is
   in `docs/archive.md`.
+- The backup sinks write at an explicit key: `backup_file(config, path, key=...)` puts
+  the file at `<directory>/<key>` on every destination (`.gz` appended when compressed),
+  and `object_key(interface_name, file_name, date)` builds the stable archive key
+  `<interface_name>/[YYYY/MM/DD/]<file name>` from the UTC day of the product's
+  publication date. Without a key the layout is unchanged.
 
 ## Version 3.13.0
 

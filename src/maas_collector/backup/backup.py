@@ -190,10 +190,53 @@ class CollectorBackup:
         """
         return [self.args.directory]
 
+    def object_key(
+        self,
+        interface_name: str,
+        file_name: str,
+        date: datetime.datetime = None,
+    ) -> str:
+        """the stable key of an archived product, under the directory of the backup
+
+        Args:
+            interface_name (str): interface of the product
+            file_name (str): file name of the product
+            date (datetime.datetime, optional): publication date of the product,
+                used with calendar_tree. A naive date is read as UTC. Defaults to
+                now.
+
+        Returns:
+            str: "<interface_name>/<file_name>", or with calendar_tree
+            "<interface_name>/YYYY/MM/DD/<file_name>", the UTC day of the date
+        """
+        elements = [interface_name]
+
+        if self.args.calendar_tree:
+            if date is None:
+                date = datetime.datetime.now(tz=datetime.UTC)
+            elif date.tzinfo is None:
+                date = date.replace(tzinfo=datetime.UTC)
+            else:
+                date = date.astimezone(datetime.UTC)
+
+            elements.extend([f"{date.year:04d}", f"{date.month:02d}", f"{date.day:02d}"])
+
+        elements.append(file_name)
+
+        return "/".join(elements)
+
     def get_backup_path(
-        self, config, path, dirdatetime: datetime.datetime = None
+        self, config, path, dirdatetime: datetime.datetime = None, key: str = None
     ) -> tuple:
-        """generate remote path"""
+        """generate remote path
+
+        With a key, the file goes to "<directory>/<key>": the result is the
+        directory part and the file name of that path.
+        """
+
+        if key is not None:
+            directory, _, name = f"{self.args.directory}/{key}".rpartition("/")
+            return directory, name
 
         path_elements = [self.args.directory]
 
@@ -322,12 +365,15 @@ class CollectorBackup:
                 report.duration,
             )
 
-    def backup_file(self, config, path) -> typing.List[BackupReport]:
+    def backup_file(self, config, path, key: str = None) -> typing.List[BackupReport]:
         """Copy file to backup space
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): write the file at "<directory>/<key>" on every
+                destination ("<directory>/<key>.gz" when compressed), instead of
+                the dated layout. Defaults to None.
 
         Returns:
             list[BackupReport]: one report per destination the file was sent to
@@ -361,8 +407,11 @@ class CollectorBackup:
 
             path = gzip_path
 
+            if key is not None:
+                key = f"{key}.gz"
+
         try:
-            reports = self.backup_file_implementation(config, path) or []
+            reports = self.backup_file_implementation(config, path, key) or []
         finally:
             # clean up compressed file. In a finally block because an implementation
             # raising outside its TRANSFER_ERRORS used to leak the .gz forever.
@@ -377,13 +426,16 @@ class CollectorBackup:
 
         return reports
 
-    def backup_file_implementation(self, config, path) -> typing.List[BackupReport]:
+    def backup_file_implementation(
+        self, config, path, key: str = None
+    ) -> typing.List[BackupReport]:
         """This function which shall be redefined by the child class is responsible
            to perform the file backup operation to the remote server
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): explicit key, see backup_file
 
         Raises:
             NotImplementedError: Raise in case the backup implementation

@@ -93,7 +93,9 @@ class CollectorBackupS3(CollectorBackup):
         """override: an s3 backup sends every file to all its buckets"""
         return list(self.buckets)
 
-    def backup_file_implementation(self, config, path) -> List[BackupReport]:
+    def backup_file_implementation(
+        self, config, path, key: str = None
+    ) -> List[BackupReport]:
         """Upload path to every configured bucket.
 
         One report per bucket: a failure on one bucket is reported and the upload
@@ -102,6 +104,7 @@ class CollectorBackupS3(CollectorBackup):
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): explicit key, see CollectorBackup.backup_file
 
         Returns:
             list[BackupReport]: one report per bucket
@@ -112,7 +115,7 @@ class CollectorBackupS3(CollectorBackup):
         # calendar_tree, it is derived from datetime.now(), so computing it per
         # bucket could scatter the copies of one file over two day directories
         # when a run straddles midnight
-        remote_file_path = "/".join(self.get_backup_path(config, path))
+        remote_file_path = "/".join(self.get_backup_path(config, path, key=key))
 
         for bucket in self.buckets:
 

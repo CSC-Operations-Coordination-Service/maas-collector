@@ -32,6 +32,13 @@ Keys common to every type:
 
 The destination path is `directory[/YYYY/MM/DD]/<interface name>/<file name>`.
 
+With an explicit key (used by the [continuous archive](archive)), the file goes to
+`<directory>/<key>` on every destination (`<directory>/<key>.gz` when compressed)
+instead. `object_key(interface_name, file_name, date)` builds the key of the archive
+layout, `<interface_name>/[YYYY/MM/DD/]<file name>`: with `calendar_tree`, the date is
+the UTC day of the date given (the publication date of the product), so a product keeps
+the same object whenever it is transferred.
+
 ## FileSystem
 
 ```json

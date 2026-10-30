@@ -6,8 +6,10 @@ what they return is tested in test_backup_report.py.
 """
 
 import dataclasses
+import datetime
 import gzip
 import os
+import pathlib
 from unittest.mock import Mock, patch
 
 import botocore.exceptions
@@ -394,3 +396,68 @@ def test_the_s3_configuration_masks_both_keys_in_its_repr():
 
     assert fields["s3_access_key"].metadata["sensitive"]
     assert fields["s3_secret_key"].metadata["sensitive"]
+
+
+CONFIG = FakeConfig(interface_name="ITF_A", model_name="ProductA")
+DAY = datetime.datetime(2026, 3, 4, 23, 30, tzinfo=datetime.UTC)
+
+
+def test_object_key_without_calendar_tree(local_backup):
+    assert local_backup().object_key("ITF_A", "P1.zip", DAY) == "ITF_A/P1.zip"
+
+
+def test_object_key_files_by_the_given_day(local_backup):
+    assert (
+        local_backup(calendar_tree=True).object_key("ITF_A", "P1.zip", DAY)
+        == "ITF_A/2026/03/04/P1.zip"
+    )
+
+
+def test_object_key_uses_the_utc_day_of_an_offset_date(local_backup):
+    late = datetime.datetime(
+        2026, 3, 4, 23, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=-2))
+    )
+    assert (
+        local_backup(calendar_tree=True).object_key("ITF_A", "P1.zip", late)
+        == "ITF_A/2026/03/05/P1.zip"
+    )
+
+
+def test_object_key_without_a_date_is_today_utc(local_backup):
+    today = datetime.datetime.now(tz=datetime.UTC)
+    assert local_backup(calendar_tree=True).object_key("ITF_A", "P1.zip") == (
+        f"ITF_A/{today:%Y/%m/%d}/P1.zip"
+    )
+
+
+def test_local_backup_writes_at_the_key(local_backup, source_file, tmp_path):
+    [report] = local_backup().backup_file(CONFIG, source_file, key="ITF_A/2026/03/04/P1.zip")
+    target = tmp_path / "backup" / "ITF_A/2026/03/04/P1.zip"
+    assert report.destination_path == str(target)
+    assert target.read_bytes() == pathlib.Path(source_file).read_bytes()
+
+
+def test_s3_backup_writes_every_bucket_at_the_key(source_file):
+    backup, client_mock = build_s3_backup(buckets=["b1", "b2"], directory="archive")
+    backup.backup_file(CONFIG, source_file, key="ITF_A/P1.zip")
+    upload = client_mock.return_value.upload_file
+    assert [call.args[1:] for call in upload.call_args_list] == [
+        ("b1", "archive/ITF_A/P1.zip"),
+        ("b2", "archive/ITF_A/P1.zip"),
+    ]
+
+
+def test_compressed_object_gets_gz_after_the_key(local_backup, tmp_path):
+    dat_file = tmp_path / "P1.dat"
+    dat_file.write_bytes(b"payload" * 10)
+    [report] = local_backup(enable_gzip=True).backup_file(
+        CONFIG, str(dat_file), key="ITF_A/P1.dat"
+    )
+    assert report.destination_path.endswith("ITF_A/P1.dat.gz") and report.compressed
+
+
+def test_without_key_the_layout_is_unchanged(local_backup, source_file, tmp_path):
+    [report] = local_backup().backup_file(CONFIG, source_file)
+    assert report.destination_path == str(
+        tmp_path / "backup" / "ITF_A" / os.path.basename(source_file)
+    )
