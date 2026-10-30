@@ -54,10 +54,12 @@ jobs:
     # No secrets: inherit: in openbao mode the catalog reads every value from OpenBao.
 
   # Package SBOM -> Dependency-Track project "maas-collector".
-  # Consumes the `dist` artifact built by ci. Uses the prod Nexus context on
-  # release tags, dev otherwise.
+  # Consumes the `dist` artifact built by ci. Release tags only, like the
+  # image SBOM of docker-registry: on develop every push would add a dev
+  # version to Dependency-Track, and nothing deployed runs a dev build.
   sbom:
     needs: ci
+    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read
       id-token: write # the OIDC token the jobs log in to OpenBao with
