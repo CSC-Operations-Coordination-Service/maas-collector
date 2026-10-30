@@ -43,6 +43,7 @@ from maas_collector.rawdata.transfer.download import (
     ProductDownloader,
     TransferError,
     TransferStopped,
+    TransientTransferError,
     safe_file_name,
     with_retries,
 )
@@ -52,6 +53,8 @@ from maas_collector.rawdata.transfer.reports import (
     archive_fields,
     archive_report,
     archived_state,
+    missing_product,
+    read_products,
     write_reports,
 )
 from maas_collector.rawdata.transfer.rule import ArchiveRule, utc_datetime
@@ -197,14 +200,136 @@ class TransferStage(FileCollector):
             )
         return self._downloaders[name]
 
+    def on_credentials_changed(self, interface_names) -> None:
+        """New credentials: the downloaders of these interfaces are built again, so
+        that they take the new ones"""
+        for name in interface_names:
+            self._downloaders.pop(name, None)
+        super().on_credentials_changed(interface_names)
+
+    # a request
+
+    def handle_request(
+        self, request: TransferRequest
+    ) -> tuple[tuple[str, str], ...]:
+        """Serve a request: transfer its products, one at a time, and report each
+
+        Never raises.
+
+        Returns:
+            the (id, index) documents a stop left, in order: the caller publishes
+            them again, so that nothing is lost
+        """
+        if request.service != self.service:
+            LOGGER.error(
+                "Dropping a transfer request for the service %s: this stage serves %s",
+                request.service,
+                self.service,
+            )
+            return ()
+
+        refusal = None
+        try:
+            context = self.request_context(request)
+            rule = context.rule
+        except RequestRefused as error:
+            LOGGER.error("Transfer request of %s refused: %s", request.interface_name, error)
+            context, refusal, rule = None, error, ArchiveRule.default(request.backup)
+
+        try:
+            products, missing = read_products(
+                es_connections.get_connection(), request.documents, rule
+            )
+        # the index cannot be read: nothing is lost if the documents wait
+        except Exception as error:  # pylint: disable=broad-except
+            LOGGER.error("Cannot read the documents of a transfer request: %s", error)
+            self.sleep(self.settings.retry_delay)
+            return tuple(request.documents)
+
+        if missing:
+            self.store(
+                [
+                    archive_report(
+                        request,
+                        missing_product(document),
+                        KO,
+                        error_type="DocumentNotFound",
+                        details=missing_product(document)["details"],
+                    )
+                    for document in missing
+                ]
+            )
+
+        seen = set()
+        for position, product in enumerate(products):
+            left = tuple(
+                (item["document_id"], item["document_index"])
+                for item in products[position:]
+            )
+            if self.should_stop_loop:
+                return left
+
+            # one transfer for a product two documents of the request describe
+            if product["product_name"] in seen:
+                continue
+            seen.add(product["product_name"])
+
+            try:
+                if context is None:
+                    reports = self.failure(request, product, [""], refusal)
+                else:
+                    reports = self.transfer_product(context, product)
+            except TransferStopped:
+                return left
+            # one product never takes the stage down: it ends as a KO
+            except Exception as error:  # pylint: disable=broad-except
+                LOGGER.exception("Transfer of %s failed", product["product_name"])
+                reports = self.failure(
+                    request, product, context.destinations if context else [""], error
+                )
+
+            self.store(reports)
+            self._healthcheck.tick()
+        return ()
+
+    def store(self, reports: list[BackupReport]) -> None:
+        """Write reports, with bounded retries. When they cannot be stored they are
+        logged at CRITICAL, and the stage goes on."""
+        if not reports:
+            return
+
+        def write():
+            try:
+                self.report_writer(reports)
+            except Exception as error:  # pylint: disable=broad-except
+                raise TransientTransferError(str(error)) from error
+
+        try:
+            with_retries(
+                write, self.settings.max_attempts, self.settings.retry_delay, self.sleep
+            )
+        except TransientTransferError as error:
+            LOGGER.critical(
+                "Cannot store %d archive reports (%s): %s",
+                len(reports),
+                error,
+                [
+                    f"{report.product_name or report.filename}"
+                    f" {report.destination} {report.status}"
+                    for report in reports
+                ],
+            )
+
     # reports
 
     @staticmethod
-    def failure(context, product, destinations, error: Exception) -> list[BackupReport]:
+    def failure(
+        request: TransferRequest, product, destinations, error: Exception
+    ) -> list[BackupReport]:
         """One KO report per destination"""
         return [
             archive_report(
-                context.request,
+                request,
                 product,
                 KO,
                 destination=destination,
@@ -215,14 +340,14 @@ class TransferStage(FileCollector):
         ]
 
     @staticmethod
-    def skipped(context, product, destinations, **fields) -> list[BackupReport]:
+    def skipped(
+        request: TransferRequest, product, destinations, **fields
+    ) -> list[BackupReport]:
         """SKIPPED reports, of an operation only: a live skip is not reported"""
-        if not context.request.operation_id:
+        if not request.operation_id:
             return []
         return [
-            archive_report(
-                context.request, product, SKIPPED, destination=destination, **fields
-            )
+            archive_report(request, product, SKIPPED, destination=destination, **fields)
             for destination in destinations
         ]
 
@@ -244,7 +369,7 @@ class TransferStage(FileCollector):
         try:
             name = safe_file_name(product.get("product_name"))
         except TransferError as error:
-            return self.failure(context, product, destinations, error)
+            return self.failure(request, product, destinations, error)
 
         decision = decide(
             destinations,
@@ -265,7 +390,7 @@ class TransferStage(FileCollector):
                 datetime.datetime.now(tz=datetime.UTC),
             )
             return self.skipped(
-                context,
+                request,
                 product,
                 destinations,
                 error_type=CONFLICT_ERROR,
@@ -273,12 +398,12 @@ class TransferStage(FileCollector):
             )
 
         if not decision.transfer:
-            return self.skipped(context, product, decision.skip)
+            return self.skipped(request, product, decision.skip)
 
         try:
             key = self.object_key(context, name, product)
         except ValueError as error:
-            return self.failure(context, product, decision.transfer, error)
+            return self.failure(request, product, decision.transfer, error)
 
         os.makedirs(self.args.working_directory, exist_ok=True)
         directory = tempfile.mkdtemp(dir=self.args.working_directory, prefix="transfer-")
@@ -327,7 +452,7 @@ class TransferStage(FileCollector):
         except TransferStopped:
             raise
         except TransferError as error:
-            return self.failure(context, product, decision.transfer, error)
+            return self.failure(request, product, decision.transfer, error)
 
         if decision.same_bytes_as and decision.same_bytes_as != downloaded.md5:
             # a mirror cannot be filled with other bytes than the archived ones
@@ -340,8 +465,8 @@ class TransferStage(FileCollector):
                 downloaded.md5,
                 datetime.datetime.now(tz=datetime.UTC),
             )
-            return self.skipped(context, product, decision.skip) + self.skipped(
-                context,
+            return self.skipped(request, product, decision.skip) + self.skipped(
+                request,
                 product,
                 decision.transfer,
                 error_type=CONFLICT_ERROR,
@@ -361,7 +486,7 @@ class TransferStage(FileCollector):
                 report.status = REPLACED
             reports.append(report)
 
-        reports.extend(self.skipped(context, product, decision.skip))
+        reports.extend(self.skipped(request, product, decision.skip))
 
         if all(report.status in (OK, REPLACED) for report in finals.values()):
             resolve_conflict(

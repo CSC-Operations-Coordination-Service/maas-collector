@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import json
+import logging
 import os
 from dataclasses import replace
 from types import SimpleNamespace
@@ -22,7 +23,11 @@ from maas_collector.rawdata.transfer.download import (
     TransferStopped,
     TransientTransferError,
 )
-from maas_collector.rawdata.transfer.reports import REPORT_INDEX, read_products
+from maas_collector.rawdata.transfer.reports import (
+    REPORT_INDEX,
+    ArchiveReportError,
+    read_products,
+)
 from maas_collector.rawdata.transfer.stage import (
     RequestRefused,
     TransferSettings,
@@ -74,6 +79,7 @@ class FakeDownloads:
         self.directories = []
         self.errors = []
         self.content = CONTENT
+        self.after = None
 
     def __call__(self, config, rule, **kwargs):
         self.factory_calls.append((config, rule, kwargs))
@@ -90,6 +96,8 @@ class FakeDownloads:
         with open(path, "wb") as output:
             output.write(self.content)
         digest = hashlib.md5(self.content).hexdigest()
+        if self.after:
+            self.after(product)
         return Downloaded(path, len(self.content), digest, digest)
 
 
@@ -518,3 +526,116 @@ def test_the_keys_are_read_from_the_credential_entry_and_never_reported(env):
     env.transfer(request())
     assert "SECRET-1" not in json.dumps(env.reports())
     assert "SECRET-1" not in repr(env.stage.request_context(request()))
+
+
+# the request loop
+
+DOCUMENTS = (("d1", "raw-data-a-2026"), ("d2", "raw-data-a-2026"))
+
+
+def test_request_of_one_product_returns_nothing_left(env):
+    assert env.stage.handle_request(request()) == ()
+    assert [r["status"] for r in env.reports()] == ["OK"]
+
+
+def test_unknown_interface_ends_every_product_ko(env):
+    env.stage.handle_request(request(interface_name="ITF_B"))
+    assert [(r["status"], "ITF_B" in r["details"]) for r in env.reports()] == [
+        ("KO", True)
+    ]
+    assert env.downloads.calls == []
+
+
+def test_unknown_backup_ends_every_product_ko(env):
+    env.stage.handle_request(request(backup="archive-b"))
+    assert [
+        (r["status"], r["destination"], "archive-b" in r["details"])
+        for r in env.reports()
+    ] == [("KO", "", True)]
+
+
+def test_missing_document_is_ko_naming_it(env):
+    env.stage.handle_request(request(documents=(("d9", "raw-data-a-2026"),)))
+    [report] = env.reports()
+    assert (report["status"], report["product_name"]) == ("KO", "")
+    assert "d9" in report["details"] and "raw-data-a-2026" in report["details"]
+
+
+def test_missing_documents_get_distinct_reports(env):
+    env.stage.handle_request(
+        request(documents=(("d8", "raw-data-a-2026"), ("d9", "raw-data-a-2026")))
+    )
+    assert len(env.reports()) == 2
+
+
+def test_request_of_another_service_is_dropped(env, caplog):
+    assert env.stage.handle_request(request(service="other")) == ()
+    assert env.reports() == [] and env.downloads.calls == []
+    assert "other" in caplog.text
+
+
+def test_stop_returns_the_documents_left(env):
+    env.raw("d2", product_name="P2.zip", product_id="id-2")
+    env.downloads.errors = [TransferStopped("stop")]
+    assert env.stage.handle_request(request(documents=DOCUMENTS)) == DOCUMENTS
+    assert env.reports() == []
+
+
+def test_stop_between_products_keeps_the_first_report(env):
+    env.raw("d2", product_name="P2.zip", product_id="id-2")
+
+    def stop(_product):
+        env.stage.should_stop_loop = True
+
+    env.downloads.after = stop
+    assert env.stage.handle_request(request(documents=DOCUMENTS)) == (DOCUMENTS[1],)
+    assert [r["product_name"] for r in env.reports()] == ["P1.zip"]
+
+
+def test_a_stop_before_the_first_product_returns_every_document(env):
+    env.raw("d2", product_name="P2.zip", product_id="id-2")
+    env.stage.should_stop_loop = True
+    assert env.stage.handle_request(request(documents=DOCUMENTS)) == DOCUMENTS
+
+
+def test_same_product_twice_in_a_request_is_transferred_once(env):
+    env.raw("d2")
+    env.stage.handle_request(request(documents=DOCUMENTS))
+    assert len(env.downloads.calls) == 1
+    assert [r["status"] for r in env.reports()] == ["OK"]
+
+
+def test_report_write_is_retried_then_logged_critical(env, caplog):
+    def failing(_reports):
+        raise ArchiveReportError("down")
+
+    env.stage.report_writer = failing
+    with caplog.at_level(logging.CRITICAL):
+        env.stage.handle_request(request())
+    assert env.sleeps == [1.0, 2.0]
+    assert any(record.levelname == "CRITICAL" for record in caplog.records)
+    assert "P1.zip" in caplog.text
+    assert env.stage._healthcheck.tick.called
+
+
+def test_an_unexpected_error_ends_the_product_ko_and_the_loop_goes_on(env):
+    env.raw("d2", product_name="P2.zip", product_id="id-2")
+    env.downloads.errors = [RuntimeError("boom")]
+    assert env.stage.handle_request(request(documents=DOCUMENTS)) == ()
+    assert [(r["product_name"], r["status"]) for r in env.reports()] == [
+        ("P1.zip", "KO"),
+        ("P2.zip", "OK"),
+    ]
+
+
+def test_changed_credentials_rebuild_the_downloader(env):
+    env.stage.handle_request(request())
+    env.stage.on_credentials_changed(["ITF_A"])
+    env.stage.handle_request(request(force=True))
+    assert len(env.downloads.factory_calls) == 2
+
+
+def test_the_downloader_is_kept_between_requests(env):
+    env.stage.handle_request(request())
+    env.stage.handle_request(request(force=True))
+    assert len(env.downloads.factory_calls) == 1
