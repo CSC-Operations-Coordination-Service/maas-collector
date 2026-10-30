@@ -186,6 +186,14 @@ python -m maas_collector.rawdata.cli.config diff odata/prip/prip-s1a.json
    yet gets version 1. A path already in the index is never overwritten: when it
    differs from the deploy tree, the import reports a `drift` and leaves it
    untouched. From then on, the index is the source of truth.
+   - The files are published in an order that keeps the references the store checks
+     (see [Backups](#backups)): first the files with neither `collectors` nor
+     `backups` (models, amqp), then the files with `backups`, then the others, each
+     group by path. A file that sorts before `backups/` does not make the import
+     refuse its entries.
+   - A report model that a backup names must be defined in a `models` file: one
+     defined inline by an entry that uses the backup cannot be imported, because the
+     entries come after the backups.
 4. Check a service: `config list --service odata`.
 5. Switch the services one at a time: set `CONFIG_BACKEND=opensearch` and
    `CONFIG_SERVICE=<service directory name>`, and remove the configuration mounts

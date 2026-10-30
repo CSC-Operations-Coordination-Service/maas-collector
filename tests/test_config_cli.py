@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from backup_samples import LOCAL, backups_file, entry, models_file
 from fakeopensearch import add_config_document
 
 from maas_collector.rawdata.cli.config import config_main
@@ -374,3 +375,42 @@ def test_sync_exits_1_when_something_was_skipped(env, fake_opensearch, tmp_path)
     add_config_document(fake_opensearch, "../x.json", 1, ["odata"], {})
 
     assert run("sync", tmp_path / "out") == 1
+
+
+def test_import_publishes_backups_before_the_entries_using_them(
+    env, store, tmp_path, capsys
+):
+    # Review Focus 4
+    root = tmp_path / "collector"
+    # sorts before "backups/"
+    write_json(
+        root / "odata" / "alpha" / "entries.json",
+        {"collectors": [entry(backup="archive-a")]},
+    )
+    write_json(
+        root / "odata" / "backups" / "archive-a.json",
+        backups_file(LOCAL | {"report_model": "ReportM"}),
+    )
+    # sorts last
+    write_json(root / "odata" / "zmodels.json", models_file("ReportM"))
+
+    assert config_main(["import", str(root)]) == 0
+
+    assert [
+        store.get(path)["version"]
+        for path in ("zmodels.json", "backups/archive-a.json", "alpha/entries.json")
+    ] == [1, 1, 1]
+
+
+def test_a_dry_run_does_not_need_the_order(env, store, tmp_path, capsys):
+    root = tmp_path / "collector"
+    write_json(
+        root / "odata" / "alpha" / "entries.json",
+        {"collectors": [entry(backup="archive-a")]},
+    )
+    write_json(root / "odata" / "backups" / "archive-a.json", backups_file(LOCAL))
+
+    assert config_main(["import", str(root), "--dry-run"]) == 0
+
+    assert "would create alpha/entries.json v1" in capsys.readouterr().out
+    assert store.latest() == []

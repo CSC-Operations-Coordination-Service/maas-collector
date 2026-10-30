@@ -250,6 +250,23 @@ def init_command(store: ConfigStore, _namespace) -> int:
     return 0
 
 
+def import_order(path: str, deploy_file) -> tuple:
+    """sort key of the files of a deploy tree: the files with neither collectors nor
+    backups (models, amqp) come first, then the files with backups, then the others,
+    each group by path. The store refuses an entry naming a backup, or a backup
+    naming a report model, that the service does not load yet."""
+    content = deploy_file.content
+
+    if "backups" in content:
+        group = 1
+    elif "collectors" in content:
+        group = 2
+    else:
+        group = 0
+
+    return group, path
+
+
 def import_command(store: ConfigStore, namespace) -> int:
     """publish the new paths of a deploy tree, report the others"""
     files, skipped, refused = read_deploy_tree(namespace.deploy_dir)
@@ -264,7 +281,7 @@ def import_command(store: ConfigStore, namespace) -> int:
 
     author = get_author(namespace) if not namespace.dry_run else namespace.author
 
-    for path in sorted(files):
+    for path in sorted(files, key=lambda name: import_order(name, files[name])):
         deploy_file = files[path]
         current = store.get(path)
 

@@ -51,6 +51,9 @@
   The guard reads `raw-data-backup*` (`ConfigStore(report_index=...)`), so the account of
   `config` and of the backend needs read access to it. `cli.config` and the backend
   share both checks.
+- `config import` publishes the models, then the backups, then the entries, so that the
+  store does not refuse entries that name a backup of a later path. A report model
+  must be defined in a `models` file, not inline by the entry that uses the backup.
 
 ### Safe configuration validation
 
