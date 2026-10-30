@@ -17,15 +17,30 @@ class CollectorBackupS3Configuration(CollectorBackupConfiguration):
 
     s3_endpoint_url: str = None
 
-    s3_secret_key: str = None
+    s3_secret_key: str = dataclasses.field(default=None, metadata={"sensitive": True})
 
-    s3_access_key: str = None
+    s3_access_key: str = dataclasses.field(default=None, metadata={"sensitive": True})
 
     s3_signature_version: str = None
 
     s3_region: str = None
 
     buckets: List[str] = dataclasses.field(default_factory=lambda: [])
+
+    def __repr__(self):
+        """like FileCollectorConfiguration: the sensitive fields are masked"""
+        parts = []
+
+        for field in dataclasses.fields(self):
+            value = (
+                "*******"
+                if field.metadata.get("sensitive")
+                else getattr(self, field.name)
+            )
+
+            parts.append(f"{field.name}={value!r}")
+
+        return f"{self.__class__.__name__}({', '.join(parts)})"
 
 
 class CollectorBackupS3(CollectorBackup):
@@ -78,7 +93,9 @@ class CollectorBackupS3(CollectorBackup):
         """override: an s3 backup sends every file to all its buckets"""
         return list(self.buckets)
 
-    def backup_file_implementation(self, config, path) -> List[BackupReport]:
+    def backup_file_implementation(
+        self, config, path, key: str = None
+    ) -> List[BackupReport]:
         """Upload path to every configured bucket.
 
         One report per bucket: a failure on one bucket is reported and the upload
@@ -87,6 +104,7 @@ class CollectorBackupS3(CollectorBackup):
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): explicit key, see CollectorBackup.backup_file
 
         Returns:
             list[BackupReport]: one report per bucket
@@ -97,7 +115,7 @@ class CollectorBackupS3(CollectorBackup):
         # calendar_tree, it is derived from datetime.now(), so computing it per
         # bucket could scatter the copies of one file over two day directories
         # when a run straddles midnight
-        remote_file_path = "/".join(self.get_backup_path(config, path))
+        remote_file_path = "/".join(self.get_backup_path(config, path, key=key))
 
         for bucket in self.buckets:
 

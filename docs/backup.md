@@ -32,6 +32,13 @@ Keys common to every type:
 
 The destination path is `directory[/YYYY/MM/DD]/<interface name>/<file name>`.
 
+With an explicit key (used by the [continuous archive](archive)), the file goes to
+`<directory>/<key>` on every destination (`<directory>/<key>.gz` when compressed)
+instead. `object_key(interface_name, file_name, date)` builds the key of the archive
+layout, `<interface_name>/[YYYY/MM/DD/]<file name>`: with `calendar_tree`, the date is
+the UTC day of the date given (the publication date of the product), so a product keeps
+the same object whenever it is transferred.
+
 ## FileSystem
 
 ```json
@@ -44,6 +51,11 @@ The destination path is `directory[/YYYY/MM/DD]/<interface name>/<file name>`.
 }
 ```
 
+The backup creates the folders below `directory` (`YYYY/MM/DD`, the interface name)
+but **not `directory` itself**: it must exist, as a mounted volume does. A missing
+`directory` is a `KO` report (`FileNotFoundError`), so an unmounted path does not
+silently fill the container's own disk.
+
 ## S3
 
 A single file is uploaded to **every** bucket of `buckets`.
@@ -53,18 +65,50 @@ A single file is uploaded to **every** bucket of `buckets`.
     "...": "...",
     "backup": {
         "type": "BackupS3",
-        "directory": "cdse/sentinel-1/ocn",
+        "directory": "archive/ocn",
         "calendar_tree": true,
         "enable_gzip": false,
         "s3_endpoint_url": "http://minio:9000",
-        "s3_access_key": "minioadmin",
-        "s3_secret_key": "minioadmin",
         "s3_signature_version": "s3v4",
         "s3_region": "us-east-1",
-        "buckets": ["cdse-backup"]
+        "buckets": ["bucket-a"],
+        "credentials": "backup-minio"
     }
 }
 ```
+
+`credentials` names the credential entry that holds the S3 keys, see "Credentials".
+
+### Credentials
+
+The S3 keys are never in a backup block, named or inline: `s3_access_key` and
+`s3_secret_key` are refused there. They live in a credential entry whose name starts
+with `backup-`, in the credential file or in the vault, like the credentials of an
+interface:
+
+```json
+{
+    "interfaces": [
+        {
+            "name": "backup-minio",
+            "s3_access_key": "<access key>",
+            "s3_secret_key": "<secret key>"
+        }
+    ]
+}
+```
+
+- The entry holds **exactly** `s3_access_key` and `s3_secret_key`. An entry holding
+  another field fails the backup at load, naming the field (never its value).
+- The collector reads the entry with the other credentials and refreshes it with them
+  (`CREDENTIAL_REFRESH_PERIOD`): a rotation reaches the next file backed up, without a
+  restart.
+- The keys are kept in the sensitive `backup_credentials` field of the configuration
+  and merged into a copy of the block only when the backup object is built. The
+  configuration is masked in the logs.
+- An entry that is missing, or that holds only one of the two keys, fails the backup
+  of the file (`Cannot backup` in the logs, and a failed file in a replay): the upload
+  never falls back on the ambient credentials of the container.
 
 ## SFTP
 
@@ -84,6 +128,69 @@ Not implemented: instanciating it raises `NotImplementedError`.
 }
 ```
 
+## Named backups
+
+A backup can be defined once, by a name, and shared by several entries. A configuration
+file holds a `backups` key, **one file per backup**: `backups/<name>.json`, whose content
+is `{"backups": [definition]}`, tagged with every service that may use it.
+
+```json
+{
+    "backups": [
+        {
+            "name": "archive-a",
+            "description": "the local archive",
+            "type": "BackupLocal",
+            "directory": "/data/archive-a",
+            "calendar_tree": true
+        }
+    ]
+}
+```
+
+| key | type | description |
+| --- | --- | --- |
+| `name` | string | `[a-z0-9][a-z0-9-]*`, at most 64 characters, unique among the files a service loads |
+| `description` | string | optional |
+| `type` | string | `BackupS3` or `BackupLocal` |
+| `directory` | string | mandatory; for `BackupLocal` an absolute path in the container, without `..` |
+| `calendar_tree` | boolean | default `false` |
+| `enable_gzip` | boolean | default `false` |
+| `report_model` | string or null | collector file backups only, see "Backup reports" |
+| `buckets` | list of strings | S3 only, mandatory for S3; several buckets are mirrors |
+| `s3_endpoint_url`, `s3_region`, `s3_signature_version` | string or null | S3 only |
+| `credentials` | string | S3 only, mandatory for S3: the name of a credential entry, which starts with `backup-` |
+
+- **Several buckets are mirrors.** Every file is written to every bucket: adding a
+  bucket duplicates every new write, it does not add capacity.
+- **A filesystem `directory` is an absolute path in the container.**
+- **No secret in a backup block**, named or inline: `s3_access_key` and
+  `s3_secret_key` are refused. They live in the credential entry named by
+  `credentials`.
+
+The rules are checked by `maas_collector.backup.named`.
+
+### Using a named backup
+
+An entry names the backup it uses:
+
+```json
+{
+    "...": "...",
+    "backup": "archive-a"
+}
+```
+
+The name is resolved when the collector loads, for **every** entry, enabled or not,
+against the `backups` of the files the service loads. An unknown name is a load error,
+and so is a name defined by two files. The entry then backs up with the definition,
+without its `name`, `description` and `credentials`, and the reports carry the
+`backup_name`.
+
+An inline block (an object, as in the examples below) stays accepted, without secret
+fields: a local file with `s3_access_key` or `s3_secret_key` in a backup block no
+longer loads, move them to a credential entry.
+
 ## Backup reports
 
 A transfer that is not reported is invisible: a failed upload is logged as
@@ -99,8 +206,8 @@ took. Leaving it out keeps the previous behaviour and writes nothing.
     "...": "...",
     "backup": {
         "type": "BackupS3",
-        "directory": "cdse/sentinel-1/ocn",
-        "buckets": ["cdse-backup", "cdse-backup-cold"],
+        "directory": "archive/ocn",
+        "buckets": ["bucket-a", "bucket-b"],
         "report_model": "Backup"
     }
 }
@@ -130,6 +237,16 @@ The model shall declare these fields:
 | `status` | `Keyword` | `OK` or `KO` |
 | `error_type` | `Keyword` | exception class name when the status is `KO` |
 | `details` | `Text` | error message when the status is `KO` |
+| `origin` | `Keyword` | `collector` for the file backups, `archive` for the transfer stage of the archive |
+| `backup_name` | `Keyword` | name of the named backup, empty for an inline block |
+| `operation_id` | `Keyword` | operation that requested the transfer, empty for the file backups |
+| `product_id` | `Keyword` | archived product, empty for the file backups |
+| `product_name` | `Keyword` | archived product name, empty for the file backups |
+| `written_md5` | `Keyword` | MD5 of the object written, empty for the file backups |
+| `catalogue_checksum` | `Keyword` | checksum announced by the catalogue, empty for the file backups |
+
+The statuses are `OK` and `KO` for the file backups. The archive also writes
+`REPLACED`, `SKIPPED` and `REQUESTED`.
 
 Notes:
 

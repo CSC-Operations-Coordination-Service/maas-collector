@@ -87,6 +87,7 @@ def test_extract_from_file_stores_the_reports(default_connection, tmp_path):
     collector = load(WITH_REPORT)
 
     config = collector.configs[0]
+    (tmp_path / "backup").mkdir()
     config.backup = dict(config.backup, directory=str(tmp_path / "backup"))
 
     ingested = tmp_path / "some-report.log"
@@ -140,6 +141,7 @@ def test_extract_from_file_without_report_model_writes_nothing(
     collector = load(WITHOUT_REPORT)
 
     config = collector.configs[0]
+    (tmp_path / "backup").mkdir()
     config.backup = dict(config.backup, directory=str(tmp_path / "backup"))
 
     ingested = tmp_path / "some-report.log"
@@ -154,7 +156,7 @@ def test_extract_from_file_without_report_model_writes_nothing(
     bulk_mock.assert_not_called()
 
     # the backup itself still ran
-    assert os.path.isdir(tmp_path / "backup")
+    assert os.path.isfile(tmp_path / "backup" / "BACKED_UP" / "some-report.log")
 
 
 def test_backup_failure_does_not_break_ingestion(default_connection, tmp_path, caplog):
@@ -162,6 +164,7 @@ def test_backup_failure_does_not_break_ingestion(default_connection, tmp_path, c
     collector = load(WITH_REPORT)
 
     config = collector.configs[0]
+    (tmp_path / "backup").mkdir()
     config.backup = dict(config.backup, directory=str(tmp_path / "backup"))
 
     ingested = tmp_path / "some-report.log"
@@ -188,6 +191,7 @@ def test_report_write_failure_does_not_break_ingestion(default_connection, tmp_p
     collector = load(WITH_REPORT)
 
     config = collector.configs[0]
+    (tmp_path / "backup").mkdir()
     config.backup = dict(config.backup, directory=str(tmp_path / "backup"))
 
     ingested = tmp_path / "some-report.log"

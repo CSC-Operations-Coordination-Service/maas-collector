@@ -11,6 +11,11 @@ import typing
 
 from maas_model import datetime_to_zulu
 
+OK, KO, REPLACED, SKIPPED, REQUESTED = "OK", "KO", "REPLACED", "SKIPPED", "REQUESTED"
+"""statuses of a report: the file backups write OK and KO, the archive also writes
+REPLACED (an object overwritten by a changed product), SKIPPED (already archived)
+and REQUESTED (a transfer asked and not done yet)"""
+
 
 @dataclasses.dataclass
 class BackupReport:
@@ -51,6 +56,28 @@ class BackupReport:
 
     model_name: str = ""
 
+    origin: str = "collector"
+    """who wrote the report: "collector" for the file backups, "archive" for the
+    transfer stage of the archive"""
+
+    backup_name: str = ""
+    """name of the backup that was used, empty for an inline backup block"""
+
+    operation_id: str = ""
+    """operation that requested the transfer, when there is one"""
+
+    product_id: str = ""
+    """identifier of the archived product, for the archive"""
+
+    product_name: str = ""
+    """name of the archived product, for the archive"""
+
+    written_md5: str = ""
+    """MD5 of the object written to the destination, for the archive"""
+
+    catalogue_checksum: str = ""
+    """checksum the catalogue announces for the product, for the archive"""
+
     # --- when and how long
     start_time: datetime.datetime = None
 
@@ -61,7 +88,8 @@ class BackupReport:
 
     # --- outcome
     status: str = ""
-    """"OK" or "KO", following the InterfaceProbeData convention"""
+    """OK or KO, following the InterfaceProbeData convention. The archive also
+    writes REPLACED, SKIPPED and REQUESTED"""
 
     error_type: str = ""
     """exception class name when status is KO, aggregatable in a dashboard"""
@@ -104,6 +132,9 @@ class CollectorBackupConfiguration:
     interface_name: str = None
 
     interface_credentials: str = None
+
+    backup_name: str = ""
+    """name of the named backup this block was resolved from, put in every report"""
 
     report_model: str = None
     """name of the model class storing the backup reports of this configuration.
@@ -159,10 +190,53 @@ class CollectorBackup:
         """
         return [self.args.directory]
 
+    def object_key(
+        self,
+        interface_name: str,
+        file_name: str,
+        date: datetime.datetime = None,
+    ) -> str:
+        """the stable key of an archived product, under the directory of the backup
+
+        Args:
+            interface_name (str): interface of the product
+            file_name (str): file name of the product
+            date (datetime.datetime, optional): publication date of the product,
+                used with calendar_tree. A naive date is read as UTC. Defaults to
+                now.
+
+        Returns:
+            str: "<interface_name>/<file_name>", or with calendar_tree
+            "<interface_name>/YYYY/MM/DD/<file_name>", the UTC day of the date
+        """
+        elements = [interface_name]
+
+        if self.args.calendar_tree:
+            if date is None:
+                date = datetime.datetime.now(tz=datetime.UTC)
+            elif date.tzinfo is None:
+                date = date.replace(tzinfo=datetime.UTC)
+            else:
+                date = date.astimezone(datetime.UTC)
+
+            elements.extend([f"{date.year:04d}", f"{date.month:02d}", f"{date.day:02d}"])
+
+        elements.append(file_name)
+
+        return "/".join(elements)
+
     def get_backup_path(
-        self, config, path, dirdatetime: datetime.datetime = None
+        self, config, path, dirdatetime: datetime.datetime = None, key: str = None
     ) -> tuple:
-        """generate remote path"""
+        """generate remote path
+
+        With a key, the file goes to "<directory>/<key>": the result is the
+        directory part and the file name of that path.
+        """
+
+        if key is not None:
+            directory, _, name = f"{self.args.directory}/{key}".rpartition("/")
+            return directory, name
 
         path_elements = [self.args.directory]
 
@@ -224,6 +298,7 @@ class CollectorBackup:
             # does not declare it
             interface_name=config.interface_name or self.args.interface_name or "",
             model_name=model_name,
+            backup_name=self.args.backup_name or "",
             start_time=datetime.datetime.now(tz=datetime.UTC),
         )
 
@@ -290,12 +365,15 @@ class CollectorBackup:
                 report.duration,
             )
 
-    def backup_file(self, config, path) -> typing.List[BackupReport]:
+    def backup_file(self, config, path, key: str = None) -> typing.List[BackupReport]:
         """Copy file to backup space
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): write the file at "<directory>/<key>" on every
+                destination ("<directory>/<key>.gz" when compressed), instead of
+                the dated layout. Defaults to None.
 
         Returns:
             list[BackupReport]: one report per destination the file was sent to
@@ -329,8 +407,11 @@ class CollectorBackup:
 
             path = gzip_path
 
+            if key is not None:
+                key = f"{key}.gz"
+
         try:
-            reports = self.backup_file_implementation(config, path) or []
+            reports = self.backup_file_implementation(config, path, key) or []
         finally:
             # clean up compressed file. In a finally block because an implementation
             # raising outside its TRANSFER_ERRORS used to leak the .gz forever.
@@ -345,13 +426,16 @@ class CollectorBackup:
 
         return reports
 
-    def backup_file_implementation(self, config, path) -> typing.List[BackupReport]:
+    def backup_file_implementation(
+        self, config, path, key: str = None
+    ) -> typing.List[BackupReport]:
         """This function which shall be redefined by the child class is responsible
            to perform the file backup operation to the remote server
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): explicit key, see backup_file
 
         Raises:
             NotImplementedError: Raise in case the backup implementation

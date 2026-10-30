@@ -9,6 +9,7 @@ import opensearchpy
 from maas_model import MAASRawDocument, ZuluDate
 
 from maas_collector.rawdata import extractor
+from maas_collector.rawdata.extractor.static import check_extractor_static
 
 LOGGER = logging.getLogger(__name__)
 
@@ -105,7 +106,9 @@ def build_extractor(meta: dict) -> extractor.base.BaseExtractor:
     return class_obj(**args)
 
 
-def build_collector_configuration(meta: dict, configuration_class, register=True):
+def build_collector_configuration(
+    meta: dict, configuration_class, register=True, evaluate=True
+):
     """build CollectorConfiguration instance from json dict
 
     Args:
@@ -113,6 +116,9 @@ def build_collector_configuration(meta: dict, configuration_class, register=True
         configuration_class: configuration dataclass to instanciate
         register (bool, optional): register an inline model in MODEL_DICT.
             Defaults to True.
+        evaluate (bool, optional): build the extractor, which evaluates its lambdas
+            and converters. False only checks them statically and leaves the
+            extractor of the configuration to None. Defaults to True.
 
     Returns:
         CollectorConfiguration: build configuration instance
@@ -143,8 +149,12 @@ def build_collector_configuration(meta: dict, configuration_class, register=True
         args["model_meta"] = None
 
     if "extractor" in meta:
-        # instanciate the extractor
-        args["extractor"] = build_extractor(args["extractor"])
+        if evaluate:
+            # instanciate the extractor
+            args["extractor"] = build_extractor(args["extractor"])
+        else:
+            check_extractor_static(args["extractor"])
+            args["extractor"] = None
     else:
         LOGGER.debug("No extractor declared in : %s", meta)
         args["extractor"] = None

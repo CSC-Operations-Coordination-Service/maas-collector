@@ -10,6 +10,7 @@ from maas_collector.rawdata.cli.lib.args import (
 )
 
 from maas_collector.rawdata.collector.filecollector import (
+    BACKUP_FAILED_EXIT_CODE,
     REPLAY_FAILED_EXIT_CODE,
     CollectorArgs,
 )
@@ -35,8 +36,15 @@ def jirax_collector_main(args):
     except KeyboardInterrupt:
         print("exited by keyboard interruption")
 
+    if collector.backup_failures:
+        # first, and flushed: the operator worker reads the last line of the output
+        print(collector.backup_failure_line(), flush=True)
+
     if collector.replay_failures:
         sys.exit(REPLAY_FAILED_EXIT_CODE)
+
+    if collector.backup_failures:
+        sys.exit(BACKUP_FAILED_EXIT_CODE)
 
 
 if __name__ == "__main__":

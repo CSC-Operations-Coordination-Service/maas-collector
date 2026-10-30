@@ -9,7 +9,10 @@ from maas_collector.rawdata.cli.lib.args import (
     odata_parser,
 )
 from maas_collector.rawdata.collector.filecollector import (
+    BACKUP_FAILED_EXIT_CODE,
     REPLAY_FAILED_EXIT_CODE,
+    TRANSFER_FAILED_EXIT_CODE,
+    TRANSFER_FAILURE_FORMAT,
     CollectorArgs,
 )
 from maas_collector.rawdata.collector.odatacollector import (
@@ -44,8 +47,26 @@ def odata_collector_main(args):
     except KeyboardInterrupt:
         print("exited by keyboard interruption")
 
+    if collector.backup_failures:
+        # first, and flushed: the operator worker reads the last line of the output
+        print(collector.backup_failure_line(), flush=True)
+
+    if collector.transfer_failures:
+        # last, and flushed: the operator worker reads the last lines of the output
+        print(
+            TRANSFER_FAILURE_FORMAT.format(count=collector.transfer_failures),
+            flush=True,
+        )
+
     if collector.replay_failures:
         sys.exit(REPLAY_FAILED_EXIT_CODE)
+
+    if collector.transfer_failures:
+        # a product whose request was never sent is missing from the archive
+        sys.exit(TRANSFER_FAILED_EXIT_CODE)
+
+    if collector.backup_failures:
+        sys.exit(BACKUP_FAILED_EXIT_CODE)
 
 
 if __name__ == "__main__":

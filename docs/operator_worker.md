@@ -60,6 +60,7 @@ Its own options:
 | `--operator-workdir`              | `OPERATOR_WORKDIR`              | system temp folder      | folder of the configuration copies and check payloads      |
 | `--operator-check-timeout`        | `OPERATOR_CHECK_TIMEOUT`        | 20                      | seconds a check may wait for the interface                 |
 | `--operator-replay-retry`         | `OPERATOR_REPLAY_RETRY`         | 3                       | retries of a failing odata replay, 10 s apart              |
+| `--operator-single-lane`          | `OPERATOR_SINGLE_LANE`          | false                   | `true` for one lane that runs every replay, one at a time  |
 
 A long replay may run `max(short timeout, days of its window × long timeout per
 day)` seconds. The timeout is the one of the lane, that is of the queue the request
@@ -78,6 +79,8 @@ Every queue is bound to the topic exchange `maas-operator-exchange` (durable):
 | -------------------------------------- | --------------------------------------- | --------------------------- |
 | `maas-operator-<service>-replay-short` | `maas.operator.<service>.replay.short`  | replays of 24 h at most     |
 | `maas-operator-<service>-replay-long`  | `maas.operator.<service>.replay.long`   | longer replays              |
+| `maas-operator-<service>-replay-custom-short` | `maas.operator.<service>.replay-custom.short` | custom replays of 24 h at most |
+| `maas-operator-<service>-replay-custom-long`  | `maas.operator.<service>.replay-custom.long`  | longer custom replays          |
 | `maas-operator-<service>-check`        | `maas.operator.<service>.check`         | product checks              |
 
 Dates are ISO 8601 UTC with `Z`. A replay request is:
@@ -88,7 +91,58 @@ Dates are ISO 8601 UTC with `Z`. A replay request is:
  "requested_by": "bob", "lane": "short"}
 ```
 
+A **custom** replay request (see [custom recollects](custom_recollect)) is published with
+the key `maas.operator.<service>.replay-custom.<lane>` and carries the fields below. Its
+`interface_name` is the real name followed by `@custom`, the real name being repeated in
+`interface`; at least one of `overrides`, `configuration` and `archive` is set (`{}`
+counts for the two objects, an empty `configuration` does not):
+
+```json
+{"operation_id": "...", "interface_name": "ITF_A@custom",
+ "interface": "ITF_A",
+ "start_date": "2026-10-01T00:00:00Z", "end_date": "2026-10-02T00:00:00Z",
+ "requested_by": "bob", "lane": "short",
+ "overrides": {"download_file_pattern": ["*.EOF*"]}, "configuration": "",
+ "archive": {"backup": "archive-a", "backup_version": null,
+             "duplicates": "skip", "force": false}}
+```
+
 ## Replays
+
+### Single lane
+
+With `OPERATOR_SINGLE_LANE=true` the worker has **one lane**, `single`, instead of
+`short`, `long` and the two custom lanes: one thread, one child at a time, and the queue
+`maas-operator-<service>-replay-single`, bound to the four replay keys of the service
+(`replay.short`, `replay.long`, `replay-custom.short`, `replay-custom.long`), so plain
+and custom requests share it. The lane serves custom requests (it is custom-capable),
+takes the health check port `OPERATOR_HEALTHCHECK_PORT`, and its timeout is the one of
+the long lane: `max(short timeout, days of the window × long timeout per day)`. The
+setting is generic: which service runs single-lane is a deployment choice. A value that
+is neither true nor false (`1/true/yes/on`, `0/false/no/off`, any case) stops the
+worker at start.
+
+When switching a service to this mode, **the plain `-short` and `-long` queues of an
+earlier two-lane worker stay bound and keep receiving copies of the requests: delete
+them** (and the custom queues, if the worker had them).
+
+### Custom lanes
+
+Beside `short` and `long`, a worker has two **custom lanes**, `custom-short` and
+`custom-long`, each with a queue of its own that only the custom key reaches. A custom
+lane takes the timeout of its plain lane, and shares its **slot**: one lock and one
+health check port per plain lane, so a custom request waits (its record staying
+`RUNNING`) while the child of the other lane of its slot runs, and a service never runs
+more children than it has plain lanes.
+
+A worker serves a custom request on a custom lane only. On a plain lane it records the
+operation `FAILED` without running anything, and a worker that does not know custom
+requests finds no interface called `<name>@custom` and fails the record the same way:
+a custom recollect is never run as a live replay. The publisher must publish a custom
+request as mandatory: it fails when no worker declared the custom queue.
+
+The child runs the real interface name, on a copy of the configuration where the entry
+has the overrides applied and the copy is validated statically (nothing is evaluated).
 
 A lane takes one request at a time. It polls its queue and **acknowledges a request
 on receipt**: a replay can run for hours, and a redelivered one would collect its
@@ -96,9 +150,12 @@ window twice. No AMQP connection is held while a replay runs.
 
 For each request, the lane copies the configuration of the service from the index to
 a temporary folder of the work folder, runs the odata or jirax collector on it as a
-child process in replay mode, with `--replay-suffix=<operation_id>` and
-`--replay-retry <OPERATOR_REPLAY_RETRY>`, then removes the folder. The child is killed
-at the lane timeout, even when it prints nothing.
+child process in replay mode, with `--replay-suffix=<operation_id>`,
+`--replay-requested-by=<requester>`, `--replay-retry <OPERATOR_REPLAY_RETRY>` and
+`--config-service=<service>`, then removes the folder. The child still reads the copy
+of the configuration: `--config-service` only names the service whose transfer stage
+receives the [archive](archive) requests of the entries that have an `archive` rule. The child is killed at the lane timeout, even when it prints
+nothing.
 
 The operation record, written by the backend in `maas-operation` before it publishes
 the request, is updated by id; the worker never creates a record:
@@ -108,7 +165,13 @@ the request, is updated by id; the worker never creates a record:
 - `DONE` with `exit_code` 0, or `FAILED` with the exit code and the last lines. The
   child exits 1 when an interface exhausted its retries, and also when it refuses
   the replay, for an interface disabled or missing in its copy, or a jira one
-  without `end_point`;
+  without `end_point`. It exits 74 when files could not be backed up, and the record
+  says `N files could not be backed up to <backup>` (found in the last line the child
+  printed, `backup failed: N files to <backup>`, even when other output follows it).
+  It exits 69 when the transfer requests of an archive rule could not all be sent, and
+  the record says `N documents could not be sent to the transfer stage` (from
+  `transfer requests failed: N documents`); when files could not be backed up as well,
+  a second line names them. The transfer code wins over the backup code;
 - `FAILED` with the reason, and no child run, when the interface is missing,
   disabled, deleted, of another service or of a class that cannot be replayed, or
   when the copy skipped configuration files of the service (bad paths in the index),

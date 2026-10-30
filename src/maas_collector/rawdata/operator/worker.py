@@ -61,6 +61,10 @@ class OperatorSettings:
     # retries of a failing replay, 10 s apart, before it fails: a dead interface
     # must not hold its lane for hours
     replay_retry: int = 3
+    # one lane, `single`, takes every replay request of the service, plain and custom,
+    # and runs one at a time, instead of a short and a long lane with a custom lane
+    # beside each
+    single_lane: bool = False
 
 
 class CheckWorker:

@@ -1,5 +1,176 @@
 # Changelog
 
+## Version 3.14.0
+
+Released 2026-10-30. Upgrade note: see "Satellite unavailability reports" before moving a collector that loads `SatUnavailabilityExtractor`.
+
+### Satellite unavailability reports
+
+- `SatUnavailabilityExtractor` is removed: the `REP__SUP__` reports are extracted with
+  the `XMLExtractor`, the header and report fields anchored on the root with
+  `root_path`. It read the subsystem text from `<Comment>` only, so the reports of the
+  new "Unavailability Tool" format, where it is `<Description>`, had no comment. The
+  extractor args read both formats, and also extract the file header, the identifier,
+  the status and the category of the new one: see `SATU_EXTRACTOR_ARGS` in
+  `tests/test_extractor_satu.py`. `start_time` and `end_time` keep their `UTC=` prefix,
+  so the documents keep their ids.
+- **Before upgrading**, switch the `Satellite-Unavailability` collector to these args
+  and add the new fields to the `SatUnavailabilityProduct` model: a configuration still
+  naming `SatUnavailabilityExtractor` no longer loads. The `XMLExtractor` has read
+  `root_path` since 3.12.0, so the configuration can move first.
+
+### Named backups
+
+- A configuration file may hold `backups`, one definition per file
+  (`backups/<name>.json`): a name, a type (`BackupS3` or `BackupLocal`), a directory,
+  the S3 buckets, endpoint, region and signature version, and the name of the
+  credential entry holding the S3 keys. The rules are in `docs/backup.md` and checked
+  by `maas_collector.backup.named`.
+- Configuration validation knows `backups`: `s3_access_key` and `s3_secret_key` are
+  refused in any backup block, a definition or an inline block (an S3 block names a
+  `credentials` entry), an `@` in an `interface_name` is refused, and an entry may not
+  use the same backup as its file `backup` and in its `archive` rule. Checked together,
+  the files of a service must define every backup named by an entry (enabled or not)
+  or an archive rule, and every `report_model` (`ConfigIntegrityError`).
+- A collector entry names its backup with `"backup": "<name>"`. The name is resolved
+  when the collector loads, for every entry, enabled or not; an unknown name is a load
+  error. The loader itself refuses `s3_access_key` and `s3_secret_key` in a backup
+  block: a local file with them no longer loads, move them to a credential entry.
+- The S3 keys of a backup live in a credential entry named `backup-…` (in the
+  credential file or the vault), holding only `s3_access_key` and `s3_secret_key`; the
+  backup names it in `credentials`. The collector reads it with the other credentials,
+  refreshes it on rotation, keeps the keys in a sensitive field of the configuration
+  (masked in its representation) and merges them into a copy of the block when the
+  backup object is built. An entry with another field fails the backup at load, naming
+  the field; an entry missing or with one key only fails the backup of the file, never
+  an upload with the ambient credentials.
+- `ConfigStore` refuses, for every write (publish, rollback, delete), a reference left
+  dangling (an entry or an archive rule of an affected service naming a backup the
+  service does not load, a backup naming a report model the service does not define:
+  `ConfigIntegrityError`), and a change of the destination of a backup that has reports
+  (`BackupDestinationError`: `type`, `s3_endpoint_url`, `directory`, `calendar_tree`,
+  `enable_gzip` or a removed bucket; a name with reports cannot move to another path).
+  The guard reads `raw-data-backup*` (`ConfigStore(report_index=...)`), so the account of
+  `config` and of the backend needs read access to it. `cli.config` and the backend
+  share both checks.
+- `config import` publishes the models, then the backups, then the entries, so that the
+  store does not refuse entries that name a backup of a later path. A report model
+  must be defined in a `models` file, not inline by the entry that uses the backup.
+
+### Safe configuration validation
+
+- `validate_config_sources(..., evaluate=False)` validates a configuration without
+  evaluating any lambda or converter: each `python` string is parsed and must be a
+  lambda without default argument, and the class and the argument names of an
+  extractor are checked against its signature (`rawdata/extractor/static.py`).
+  `build_collector_configuration` takes the same `evaluate` flag, and
+  `ConfigStore(client, index, evaluate=False)` validates its publications and
+  rollbacks that way, for a service that must not execute what it validates.
+
+### Backup reports
+
+- A backup report carries `origin` (`collector`, or `archive` for the transfer stage),
+  `backup_name`, `operation_id`, `product_id`, `product_name`, `written_md5` and
+  `catalogue_checksum`, and the statuses `REPLACED`, `SKIPPED` and `REQUESTED` exist
+  next to `OK` and `KO`. Add the seven fields to the model that stores the reports.
+- The filesystem backup no longer creates its `directory`: when it does not exist, the
+  transfer is a `KO` report, so an unmounted path does not fill the disk of the
+  container. Create the directory, or mount it, before upgrading.
+- A replay exits with status 74 when files could not be backed up to every destination
+  (a failed transfer, or the "Cannot backup" path), after collecting everything it
+  could, and prints `backup failed: <count> files to <backup>` as its last line; status
+  1 still wins when an interface exhausted its retries. The operator worker reports
+  `N files could not be backed up to <backup>`. Live mode is unchanged.
+- `CollectorBackupS3Configuration` marks `s3_access_key` and `s3_secret_key` as
+  sensitive and masks them in its representation.
+
+### Custom recollects
+
+- `maas_collector.rawdata.operator.overrides` holds what a custom recollect may change
+  in a collector entry: the allowlist (`odata_query_filter`, `download_file_pattern`,
+  `product_per_page` and `interface_credentials` of an odata entry; `jql_query` and
+  `interface_credentials` of a jira entry), the structural checks that keep the replay
+  window in a custom query, the archive choice (`backup`, `backup_version`,
+  `duplicates`, `force`) and `merge_overrides`. The rules are in
+  `docs/custom_recollect.md`.
+- The replay option `--replay-requested-by` (variable `REPLAY_REQUESTED_BY`, default
+  empty) tells the collector who asked for a replay (`ReplayArgs.requested_by`). The
+  operator worker passes the requester of the request to its child.
+- The operator worker has a custom lane beside each lane (`custom-short`, `custom-long`),
+  with the queue `maas-operator-<service>-replay-custom-<lane>` bound to the key
+  `maas.operator.<service>.replay-custom.<lane>` only. A custom request names its
+  interface `<interface>@custom`, with the real name in `interface`, and carries
+  `overrides`, `configuration` and `archive`. A custom lane shares the slot (lock and
+  health check port) of its plain lane, and a custom request on a plain lane is refused.
+  The handler applies the overrides and the archive choice to the interface's entry in
+  the configuration copy and validates the copy statically before it starts the child.
+- Single-lane mode: `--operator-single-lane` (`OPERATOR_SINGLE_LANE`, default false)
+  runs one lane, `single`, that takes the four replay keys of the service on one queue
+  and replays one request at a time. When switching a service to it, delete the plain
+  `-short` and `-long` queues of its earlier worker: they stay bound and keep receiving
+  copies of the requests.
+
+### Configuration schema
+
+- `maas_collector.rawdata.configschema.configuration_schema()` describes the configuration
+  of maas-collector for the configuration builder: the keys of every collector class
+  (type, default, required, sensitive, overridable, group, description), the arguments
+  of the extractors, the backup definitions, the archive rule, the secret keys, the
+  window rules and the shapes of the models, the amqp chunk sizes and the extractor
+  block. A test fails when a field looks like a credential and nobody classified it.
+  See `docs/configuration_schema.md`.
+
+### Continuous archive
+
+- An odata collector entry may declare an `archive` rule (`backup`, `duplicates`,
+  `fields`, `download`): every product indexed through it is archived once into that
+  named backup by the transfer stage. The rule is parsed when the configuration is
+  built (`ODataCollectorConfiguration.archive_rule`) and checked by the validation in
+  both modes: only odata entries can archive, and never into the entry's own `backup`.
+  See `docs/archive.md`.
+- The collectors and the transfer stage speak through transfer requests: exchange
+  `maas-transfer-exchange` (topic, durable), routing key `maas.transfer.<service>`,
+  queue `maas-transfer-<service>`, published mandatory and confirmed. The wire format is
+  in `docs/archive.md`.
+- The backup sinks write at an explicit key: `backup_file(config, path, key=...)` puts
+  the file at `<directory>/<key>` on every destination (`.gz` appended when compressed),
+  and `object_key(interface_name, file_name, date)` builds the stable archive key
+  `<interface_name>/[YYYY/MM/DD/]<file name>` from the UTC day of the product's
+  publication date. Without a key the layout is unchanged.
+- After a run, the collectors hand the documents of an entry with an `archive` rule to a
+  transfer requester: live, the created and updated documents, in batches of 10; in
+  replay, every extracted document, unchanged ones included (their stored index is kept
+  by `ActionIterator.unmodified_documents`), without sending the product messages again.
+  A replay with an operation id writes a `REQUESTED` report per product first. A refused
+  live request is published again at the next loop; a replay that could not send
+  requests exits with status 69 and prints `transfer requests failed: <count>
+  documents` as its last line (status 1 and the backup line keep their rules: see
+  `docs/replay.md`). A collector with an archive rule needs `CONFIG_SERVICE`, or its
+  configuration does not load.
+- The operator worker starts its replay child with `--config-service=<service>`, so the
+  archive requests of the child go to the transfer stage of the service. A child that
+  exits 69 (`TRANSFER_FAILED_EXIT_CODE`) fails the operation with `N documents could not
+  be sent to the transfer stage`, and names the files that could not be backed up on a
+  second line when there were some.
+- A new service, `python -m maas_collector.rawdata.cli.transfer --config-service
+  <service>` (`maas_collector.rawdata.transfer.stage`), archives the products of the
+  transfer requests: it reads the document, applies `duplicates`, downloads the product
+  as a stream to a `mkdtemp` directory (the token goes to the configured host only, a
+  redirect is followed without it), checks its size and checksum, uploads it to every
+  missing destination of the backup the request names at the object key
+  `<directory>/<interface>/[YYYY/MM/DD/]<name>`, and writes one archive report per
+  destination (`OK`, `REPLACED`, `SKIPPED`, `KO`). Retries are bounded
+  (`TRANSFER_MAX_ATTEMPTS`, `TRANSFER_RETRY_DELAY`, `TRANSFER_MAX_DOWNLOAD_SECONDS`).
+  Requests are acknowledged on receipt; a stop publishes the documents it left again.
+  A conflict (a product seen again with another checksum) is recorded in the index
+  `maas-archive-conflict` until a later transfer resolves it. Start one stage per
+  collector service before using an archive rule: it declares the queue of the service.
+- `maas_collector.rawdata.transfer.gaps.find_gaps` lists the products of an archived
+  interface indexed more than a delay ago with no outcome report (`OK`, `REPLACED`,
+  `KO`, `SKIPPED`) in a backup: the gaps a crash or an unpublished request leave. The
+  model of the entry must declare an `interface_name` field (a `ValueError` otherwise).
+  The test fake of OpenSearch understands `range` queries.
+
 ## Version 3.13.0
 
 ### Operator image

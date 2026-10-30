@@ -24,25 +24,35 @@ class CollectorBackupLocal(CollectorBackup):
         """override: a local backup has a single destination directory"""
         return [self.args.directory]
 
-    def backup_file_implementation(self, config, path) -> List[BackupReport]:
+    def backup_file_implementation(
+        self, config, path, key: str = None
+    ) -> List[BackupReport]:
         """Copy path under the configured directory.
 
         Args:
             config (CollectorConfiguration): ingestion config
             path (str): local file path on the pod working directory
+            key (str, optional): explicit key, see CollectorBackup.backup_file
 
         Returns:
             list[BackupReport]: a single report
         """
-        local_file_path = "/".join(self.get_backup_path(config, path))
+        local_file_path = "/".join(self.get_backup_path(config, path, key=key))
 
         with self.report_transfer(
             config, path, self.args.directory, local_file_path
         ) as report:
 
+            # the directory itself is never created: an unmounted path would
+            # silently fill the disk of the container
+            if not os.path.isdir(self.args.directory):
+                raise FileNotFoundError(
+                    f"backup directory {self.args.directory} does not exist"
+                )
+
             parent_folder = os.path.dirname(local_file_path)
 
-            # Create the parent folder if it doesn't exist
+            # Create the folders below the directory
             os.makedirs(parent_folder, exist_ok=True)
 
             self.logger.debug(

@@ -10,6 +10,7 @@ import functools
 import logging
 import time
 
+from maas_collector.backup.named import SECRET_FIELDS
 from maas_collector.rawdata.collector.credentialprovider import (
     CredentialProvider,
     FileCredentialProvider,
@@ -98,6 +99,52 @@ class CredentialMixin:
                 )
             setattr(config, name, value)
 
+    @staticmethod
+    def set_backup_credentials(config, credential_dict: dict) -> None:
+        """set the S3 keys of the backup of a configuration, read from the credential
+        entry the backup names
+
+        Only s3_access_key and s3_secret_key are copied, into backup_credentials.
+        The entry stays out of the backup block: the keys are merged into a copy
+        when the backup object is built.
+
+        Args:
+            config: configuration
+            credential_dict (dict): credential dictionnary
+
+        Raises:
+            ValueError: the entry holds a field that is not an S3 key. The message
+                names the field, never a value.
+        """
+        entry_name = getattr(config, "backup_credentials_entry", "")
+
+        if not entry_name:
+            return
+
+        if entry_name not in credential_dict:
+            LOGGER.warning(
+                "No credential entry %s for the backup of interface %s:"
+                " its files will not be backed up",
+                entry_name,
+                config.interface_name,
+            )
+            config.backup_credentials = {}
+            return
+
+        entry = credential_dict[entry_name]
+
+        other_fields = sorted(set(entry) - set(SECRET_FIELDS))
+        if other_fields:
+            raise ValueError(
+                f"credential entry {entry_name} of the backup of interface"
+                f" {config.interface_name} holds {', '.join(other_fields)}:"
+                f" a backup entry holds only {' and '.join(SECRET_FIELDS)}"
+            )
+
+        config.backup_credentials = {
+            key: entry[key] for key in SECRET_FIELDS if key in entry
+        }
+
     @functools.cached_property
     def credential_provider(self) -> CredentialProvider | None:
         """where the credentials are read from, None without credential source"""
@@ -118,7 +165,11 @@ class CredentialMixin:
         for config in self.credential_targets():
             names.update(
                 name
-                for name in (config.interface_credentials, config.interface_name)
+                for name in (
+                    config.interface_credentials,
+                    config.interface_name,
+                    getattr(config, "backup_credentials_entry", ""),
+                )
                 if name
             )
 
@@ -169,6 +220,7 @@ class CredentialMixin:
         # iterate over all configuration and populate credentials
         for config in self.credential_targets():
             self.set_credential_attributes(config, entries)
+            self.set_backup_credentials(config, entries)
 
     def refresh_credentials(self):
         """read the credentials again once the refresh period has elapsed, and set
@@ -250,23 +302,33 @@ class CredentialMixin:
         interface_names = []
 
         for config in self.credential_targets():
-            if not changed & {config.interface_credentials, config.interface_name}:
+            interface_changed = changed & {
+                config.interface_credentials,
+                config.interface_name,
+            }
+            backup_entry = getattr(config, "backup_credentials_entry", "")
+
+            if not interface_changed and backup_entry not in changed:
                 continue
 
-            removed = (
-                self.credential_fields(config, previous).keys()
-                - self.credential_fields(config, entries).keys()
-            )
-
-            for name in sorted(removed):
-                LOGGER.warning(
-                    "%s was removed from the credentials of %s:"
-                    " it keeps its value until the collector restarts",
-                    name,
-                    config.interface_name,
+            if interface_changed:
+                removed = (
+                    self.credential_fields(config, previous).keys()
+                    - self.credential_fields(config, entries).keys()
                 )
 
-            self.set_credential_attributes(config, entries)
+                for name in sorted(removed):
+                    LOGGER.warning(
+                        "%s was removed from the credentials of %s:"
+                        " it keeps its value until the collector restarts",
+                        name,
+                        config.interface_name,
+                    )
+
+                self.set_credential_attributes(config, entries)
+
+            if backup_entry in changed:
+                self.set_backup_credentials(config, entries)
 
             interface_names.append(config.interface_name)
 

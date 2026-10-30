@@ -36,6 +36,13 @@ MODEL_META = {
         {"name": "status", "type": "Keyword"},
         {"name": "error_type", "type": "Keyword"},
         {"name": "details", "type": "Text"},
+        {"name": "origin", "type": "Keyword"},
+        {"name": "backup_name", "type": "Keyword"},
+        {"name": "operation_id", "type": "Keyword"},
+        {"name": "product_id", "type": "Keyword"},
+        {"name": "product_name", "type": "Keyword"},
+        {"name": "written_md5", "type": "Keyword"},
+        {"name": "catalogue_checksum", "type": "Keyword"},
     ],
     "partition_field": "ingestionTime",
     "partition_format": "%Y",
@@ -61,9 +68,9 @@ def fixture_report():
         source_path="/tmp/S1A_IW_OCN.SAFE",
         size_bytes=4194304,
         backup_type="BackupS3",
-        destination="cdse-backup",
-        destination_path="cdse/sentinel-1/ocn/2026/08/01/CDSE_S1_OCN/S1A_IW_OCN.SAFE",
-        interface_name="CDSE_S1_OCN_FILES",
+        destination="bucket-a",
+        destination_path="archive/ocn/2026/08/01/ITF_A/S1A_IW_OCN.SAFE",
+        interface_name="ITF_A_FILES",
         model_name="S1OcnBackup",
         start_time=start,
         end_time=start + datetime.timedelta(seconds=2, milliseconds=500),
@@ -126,16 +133,16 @@ def test_build_action_is_a_create(model, report):
 def test_build_action_source(model, report):
     """everything ActionIterator would normally fill has to be filled by hand"""
     action = BackupReportWriter(model).build_action(
-        report, report_name="CDSE_S1_OCN.json", report_folder="/tmp/work"
+        report, report_name="ITF_A.json", report_folder="/tmp/work"
     )
 
     source = action["_source"]
 
     assert source["status"] == "OK"
-    assert source["destination"] == "cdse-backup"
+    assert source["destination"] == "bucket-a"
     assert source["size_bytes"] == 4194304
     assert source["duration"] == 2.5
-    assert source["reportName"] == "CDSE_S1_OCN.json"
+    assert source["reportName"] == "ITF_A.json"
     assert source["reportFolder"] == "/tmp/work"
 
     assert ZULU_RE.match(source["start_time"])
@@ -229,3 +236,43 @@ def test_write_reports_real_errors(model, report, caplog):
 
     assert len(errors) == 1
     assert "could not be stored" in caplog.text
+
+
+def test_build_action_source_carries_the_new_fields(model):
+    start = datetime.datetime(2026, 8, 1, 10, 0, 0, tzinfo=datetime.UTC)
+    report = BackupReport(
+        origin="archive",
+        backup_name="archive-a",
+        operation_id="op1",
+        product_id="p1",
+        product_name="P1.zip",
+        written_md5="m",
+        catalogue_checksum="c",
+        status="OK",
+        start_time=start,
+    )
+
+    source = BackupReportWriter(model).build_action(report)["_source"]
+
+    assert source["backup_name"] == "archive-a"
+    assert source["origin"] == "archive"
+    assert source["written_md5"] == "m"
+
+
+def test_a_model_without_the_new_fields_still_warns(caplog):
+    old_fields = {
+        "origin",
+        "backup_name",
+        "operation_id",
+        "product_id",
+        "product_name",
+        "written_md5",
+        "catalogue_checksum",
+    }
+    meta = dict(MODEL_META, name="OldBackup")
+    meta["fields"] = [f for f in MODEL_META["fields"] if f["name"] not in old_fields]
+
+    with caplog.at_level(logging.WARNING):
+        BackupReportWriter(build_model_class(meta))
+
+    assert "backup_name" in caplog.text and "written_md5" in caplog.text

@@ -10,6 +10,14 @@ from requests import RequestException
 # pylint: disable=line-too-long / C0301
 
 
+class AuthenticationError(ValueError):
+    """The authentication server refused: ``status_code`` is its HTTP status"""
+
+    def __init__(self, message: str, status_code: int = 0) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 @dataclass
 class BasicConfiguration:
     """Configuration for Authentication"""
@@ -157,7 +165,9 @@ class OAuth(Authentication):
                 response.status_code,
                 response.content,
             )
-            raise ValueError(f"Error querying token {self.token_url}")
+            raise AuthenticationError(
+                f"Error querying token {self.token_url}", response.status_code
+            )
 
         response_json = response.json()
 
@@ -231,7 +241,9 @@ class OAuth(Authentication):
                 response.status_code,
                 response.content,
             )
-            raise ValueError(f"Error refreshing token {self.token_url}")
+            raise AuthenticationError(
+                f"Error refreshing token {self.token_url}", response.status_code
+            )
 
         response_json = response.json()
 
@@ -329,7 +341,9 @@ class SessionAuth(Authentication):
                 response.status_code,
                 response.content,
             )
-            raise ValueError(f"Error login {self.login_url}")
+            raise AuthenticationError(
+                f"Error login {self.login_url}", response.status_code
+            )
 
 
 # global implemetation dict. TODO refactor with __init__subclass later like maas-engine

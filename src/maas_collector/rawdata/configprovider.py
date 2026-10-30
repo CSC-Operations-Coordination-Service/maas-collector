@@ -16,12 +16,19 @@ from opensearchpy.connection.connections import connections as es_connections
 from opensearchpy.exceptions import NotFoundError
 from opensearchpy.helpers import scan
 
+from maas_collector.backup.named import (
+    BACKUP_NAME,
+    MAX_NAME_LENGTH,
+    backup_definitions,
+    check_backup_block,
+)
 from maas_collector.rawdata.configuration import (
     build_collector_configuration,
     build_model_class,
     find_configurations,
 )
 from maas_collector.rawdata.messenger import parse_chunk_config
+from maas_collector.rawdata.transfer.rule import check_archive_rule
 
 LOGGER = logging.getLogger("ConfigProvider")
 
@@ -29,7 +36,7 @@ DEFAULT_CONFIG_INDEX = "maas-collector-config"
 
 # top-level keys of a configuration file. A credential file, {"interfaces": ...},
 # has none of them.
-CONFIG_KEYS = frozenset({"collectors", "models", "amqp"})
+CONFIG_KEYS = frozenset({"collectors", "models", "amqp", "backups"})
 
 
 class ConfigValidationError(ValueError):
@@ -43,9 +50,23 @@ class ConfigValidationError(ValueError):
         self.reason = reason
 
 
+class ConfigIntegrityError(ConfigValidationError):
+    """a write that would leave a reference dangling: a backup or a report model that
+    a service does not define"""
+
+    def __init__(self, label: str, problems: list):
+        super().__init__(label, "; ".join(problems))
+
+        self.problems = problems
+
+
+class BackupDestinationError(ConfigValidationError):
+    """a write that changes the destination of a backup which has reports"""
+
+
 def is_config_content(content) -> bool:
     """True for the content of a configuration file: a JSON object whose top-level
-    keys are within collectors, models and amqp"""
+    keys are within collectors, models, amqp and backups"""
     return isinstance(content, dict) and set(content) <= CONFIG_KEYS
 
 
@@ -67,7 +88,7 @@ class ConfigSource:
     # file path, or document path
     name: str
 
-    # {collectors?, models?, amqp?}
+    # {collectors?, models?, amqp?, backups?}
     content: dict
 
     # document version, None for a file
@@ -302,10 +323,135 @@ def build_config_provider(args) -> ConfigProvider:
     )
 
 
+def integrity_problems(sources: list) -> list:
+    """Find the references that the sources of ONE service leave dangling
+
+    Entries are scanned enabled or not. A model is defined by a `models` item or by
+    the inline `model` of an entry. The content may be malformed, as stored
+    documents may predate a rule: it is read leniently.
+
+    Args:
+        sources (list[ConfigSource]): the files one service loads
+
+    Returns:
+        list[str]: one line per problem, each starting with the file path
+    """
+    problems = []
+    backups = {}
+    models = set()
+    references = []
+    report_models = []
+
+    for source in sources:
+        content = source.content if isinstance(source.content, dict) else {}
+
+        for definition in content.get("backups") or []:
+            if not isinstance(definition, dict):
+                continue
+
+            name = definition.get("name")
+
+            if name in backups and backups[name] != source.name:
+                problems.append(
+                    f"backup {name} is defined in both {backups[name]}"
+                    f" and {source.name}"
+                )
+            else:
+                backups.setdefault(name, source.name)
+
+            if definition.get("report_model"):
+                report_models.append(
+                    (source.name, name, definition["report_model"])
+                )
+
+        for model_meta in content.get("models") or []:
+            if isinstance(model_meta, dict):
+                models.add(model_meta.get("name"))
+
+        for meta in content.get("collectors") or []:
+            if not isinstance(meta, dict):
+                continue
+
+            if isinstance(meta.get("model"), dict):
+                models.add(meta["model"].get("name"))
+
+            interface = meta.get("interface_name")
+
+            if isinstance(meta.get("backup"), str):
+                references.append((source.name, interface, "uses", meta["backup"]))
+
+            archive = meta.get("archive")
+            if isinstance(archive, dict) and isinstance(archive.get("backup"), str):
+                references.append(
+                    (source.name, interface, "archives to", archive["backup"])
+                )
+
+    for path, interface, verb, backup in references:
+        if backup not in backups:
+            problems.append(
+                f"{path}: interface {interface} {verb} backup {backup},"
+                " which is not defined"
+            )
+
+    for path, backup, model in report_models:
+        if model not in models:
+            problems.append(
+                f"{path}: backup {backup} names report model {model},"
+                " which is not defined"
+            )
+
+    return problems
+
+
+def check_entry_backups(meta: dict) -> None:
+    """Check the backup keys of a collector entry, whatever the other files hold
+
+    Raises:
+        ValueError: `@` in the interface name, a `backup` that is neither a name nor
+            a block, a secret field in an inline block, the same backup for the
+            file backup and the archive
+    """
+    name = meta.get("interface_name")
+
+    if isinstance(name, str) and "@" in name:
+        raise ValueError(f"interface name {name} must not contain @")
+
+    backup = meta.get("backup")
+
+    if backup is None:
+        return
+
+    if isinstance(backup, str):
+        if len(backup) > MAX_NAME_LENGTH or not BACKUP_NAME.fullmatch(backup):
+            raise ValueError(
+                f"interface {name}: backup name {backup!r} must match"
+                f" [a-z0-9][a-z0-9-]* and be at most {MAX_NAME_LENGTH} characters"
+            )
+    elif isinstance(backup, dict):
+        check_backup_block(backup, f"interface {name}: backup")
+    else:
+        raise ValueError(
+            f"interface {name}: backup must be a backup name or a block,"
+            f" got {backup!r}"
+        )
+
+    archive = meta.get("archive")
+    if (
+        isinstance(backup, str)
+        and isinstance(archive, dict)
+        and archive.get("backup") == backup
+    ):
+        raise ValueError(
+            f"interface {name}: backup {backup} cannot be both the file backup"
+            " and the archive backup"
+        )
+
+
 def validate_config_sources(
     sources: list,
     config_classes_for: typing.Callable[[dict], list],
     resolve_models: bool = True,
+    evaluate: bool = True,
 ) -> None:
     """Check that collectors can load configuration sources, without changing the
     models the running process has registered
@@ -315,11 +461,17 @@ def validate_config_sources(
         config_classes_for (Callable[[dict], list]): configuration classes each
             collector entry must build with
         resolve_models (bool, optional): check that every model named by a collector
-            entry or a backup report is defined by one of the sources. Off to check
-            a single file, whose models may live in another file. Defaults to True.
+            entry or a backup report is defined by one of the sources, that every
+            backup named by an entry or an archive rule is defined, and that the
+            report model of a definition is defined. Off to check a single file,
+            whose models and backups may live in another file. Defaults to True.
+        evaluate (bool, optional): build the extractors, which evaluates the lambdas
+            and converters of the entries. False parses them without evaluating
+            anything (see maas_collector.rawdata.extractor.static). Defaults to True.
 
     Raises:
         ConfigValidationError: on the first source that cannot be loaded
+        ConfigIntegrityError: when a reference of the sources is dangling
     """
     defined = set()
     referenced = []
@@ -336,17 +488,23 @@ def validate_config_sources(
             )
 
         try:
-            for key in ("collectors", "models"):
+            for key in ("collectors", "models", "backups"):
                 if not isinstance(content.get(key, []), list):
                     raise TypeError(f"{key} must be a list")
+
+            # the definition rules, and the names unique within the file
+            backup_definitions([content])
 
             # the chunk sizes are read as setup() reads them
             parse_chunk_config(content)
 
             for meta in content.get("collectors", []):
+                check_entry_backups(meta)
+                check_archive_rule(meta, config_classes_for(meta))
+
                 for configuration_class in config_classes_for(meta):
                     build_collector_configuration(
-                        meta, configuration_class, register=False
+                        meta, configuration_class, register=False, evaluate=evaluate
                     )
 
                 if isinstance(meta.get("model"), dict):
@@ -377,6 +535,10 @@ def validate_config_sources(
                     f"model {model_name} is defined in none of the configuration"
                     " files",
                 )
+
+        problems = integrity_problems(sources)
+        if problems:
+            raise ConfigIntegrityError("backups", problems)
 
 
 def describe_config_changes(previous: list, current: list) -> str:
