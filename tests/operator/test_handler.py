@@ -1,7 +1,9 @@
 import copy
+import dataclasses
 import datetime
 import json
 import os
+import threading
 
 import kombu
 import pytest
@@ -95,16 +97,15 @@ class FakeRunner:
         return self.code, self.tail
 
 
-def lane(store, runner, tmp_path, recorder=None, name="short", port=18081):
-    """the replay worker of maas-engine with the collector's handler, and its lane"""
-    recorder = recorder or FakeRecorder()
+def make_worker(store, tmp_path, recorder, port=18081):
+    """the replay worker of maas-engine with the collector's handler, four lanes"""
     lanes = [
         Lane("short", "q-short", "k.short", LaneTimeout(base=100)),
         Lane("long", "q-long", "k.long", LaneTimeout(base=100, per_day=50)),
         Lane("custom-short", "q-cshort", "k.cshort", LaneTimeout(base=100)),
         Lane("custom-long", "q-clong", "k.clong", LaneTimeout(base=100, per_day=50)),
     ]
-    worker = ReplayWorker(
+    return ReplayWorker(
         lambda: None,
         recorder,
         CollectorReplayHandler(store, "odata", ("short", "long"), port, 3),
@@ -112,6 +113,12 @@ def lane(store, runner, tmp_path, recorder=None, name="short", port=18081):
         kombu.Exchange("test"),
         str(tmp_path),
     )
+
+
+def lane(store, runner, tmp_path, recorder=None, name="short", port=18081):
+    """the replay worker of maas-engine with the collector's handler, and its lane"""
+    recorder = recorder or FakeRecorder()
+    worker = make_worker(store, tmp_path, recorder, port)
     worker.runners[name] = runner
     chosen = worker.lanes[name]
     return (
@@ -439,3 +446,117 @@ def test_describe_failure_keeps_the_other_codes():
         CollectorReplayHandler.describe_failure(1, "tail")
     )
     assert "exit code 9" in CollectorReplayHandler.describe_failure(9, "tail")
+
+
+class BlockingRunner(FakeRunner):
+    """a child that runs until it is released, counting the children of its slot"""
+
+    def __init__(self, tracker, slot):
+        super().__init__()
+        self.tracker, self.slot = tracker, slot
+        self.started, self.release = threading.Event(), threading.Event()
+
+    def run(self, command, env, timeout, progress, progress_interval=30):
+        with self.tracker["lock"]:
+            running = self.tracker["running"]
+            running[self.slot] = running.get(self.slot, 0) + 1
+            self.tracker["max_slot"][self.slot] = max(
+                self.tracker["max_slot"].get(self.slot, 0), running[self.slot]
+            )
+            self.tracker["max_all"] = max(
+                self.tracker["max_all"], sum(running.values())
+            )
+        self.started.set()
+        self.release.wait(5)
+        with self.tracker["lock"]:
+            self.tracker["running"][self.slot] -= 1
+        return 0, "done"
+
+
+def start(worker, name, request):
+    thread = threading.Thread(target=worker.handle, args=(worker.lanes[name], request))
+    thread.start()
+    return thread
+
+
+def test_a_custom_lane_shares_the_slot_of_its_plain_lane(odata_store, tmp_path):
+    recorder = FakeRecorder()
+    worker = make_worker(odata_store, tmp_path, recorder)
+    tracker = {"lock": threading.Lock(), "running": {}, "max_slot": {}, "max_all": 0}
+    runners = {
+        "short": BlockingRunner(tracker, "short"),
+        "custom-short": BlockingRunner(tracker, "short"),
+        "long": BlockingRunner(tracker, "long"),
+    }
+    worker.runners.update(runners)
+    short = start(worker, "short", req(operation_id="s"))
+    assert runners["short"].started.wait(5)
+    custom = start(
+        worker,
+        "custom-short",
+        dataclasses.replace(custom_req(configuration="x"), operation_id="c"),
+    )
+    long = start(worker, "long", req(operation_id="l"))
+    assert runners["long"].started.wait(5)
+    # the other plain lane runs beside the short one, the custom lane waits
+    assert not runners["custom-short"].started.wait(0.3)
+    assert ("c", RUNNING) in recorder.calls
+    runners["short"].release.set()
+    assert runners["custom-short"].started.wait(5)
+    runners["custom-short"].release.set()
+    runners["long"].release.set()
+    for thread in (short, custom, long):
+        thread.join(5)
+        assert not thread.is_alive()
+    assert tracker["max_slot"] == {"short": 1, "long": 1}
+    assert tracker["max_all"] == 2
+    assert [call for call in recorder.calls if call[1] == DONE] == [
+        ("s", DONE, 0),
+        ("c", DONE, 0),
+        ("l", DONE, 0),
+    ] or {call[0] for call in recorder.calls if call[1] == DONE} == {"s", "c", "l"}
+    assert os.listdir(tmp_path) == []
+
+
+def test_a_failed_request_frees_the_slot(odata_store, tmp_path, monkeypatch):
+    recorder = FakeRecorder()
+    worker = make_worker(odata_store, tmp_path, recorder)
+    worker.runners["custom-short"] = FakeRunner(boom=OSError("no exec"))
+    real_sync = handler_module.sync_configs
+    failing = {"armed": False}
+
+    def sync_failing_once(*args):
+        if failing["armed"]:
+            failing["armed"] = False
+            raise RuntimeError("index down")
+        return real_sync(*args)
+
+    monkeypatch.setattr(handler_module, "sync_configs", sync_failing_once)
+    unknown = dataclasses.replace(
+        custom_req(configuration="x"), interface_name="NOPE@custom"
+    )
+    unknown = dataclasses.replace(
+        unknown, extra={"interface": "NOPE", "configuration": "x"}
+    )
+    refused = [
+        ("short", custom_req(configuration="x")),  # refused before the slot
+        ("custom-short", unknown),  # prepare fails inside the slot
+        ("custom-short", custom_req(configuration="x")),  # sync raises
+        ("custom-short", custom_req(configuration="x")),  # the child cannot start
+    ]
+    for number, (name, request) in enumerate(refused):
+        failing["armed"] = number == 2
+        thread = start(
+            worker, name, dataclasses.replace(request, operation_id=f"f{number}")
+        )
+        thread.join(5)
+        assert not thread.is_alive()
+        runner = FakeRunner()
+        worker.runners["short"] = runner
+        plain = start(worker, "short", req(operation_id=f"p{number}"))
+        plain.join(5)
+        assert not plain.is_alive(), f"the slot stayed locked after {name} {number}"
+        assert (f"p{number}", DONE, 0) in recorder.calls
+        assert len(runner.commands) == 1
+    assert [c for c in recorder.calls if c[1] == FAILED and c[0].startswith("f")] != []
+    assert os.listdir(tmp_path) == []

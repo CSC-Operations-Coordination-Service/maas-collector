@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
@@ -104,6 +105,8 @@ class Prepared:
     module: str
     # the name the child is started with: the real one, whatever the request's
     interface_name: str = ""
+    # the slot of the lane, held from `prepare` to `cleanup`
+    slot: "threading.Lock | None" = None
 
 
 class CollectorReplayHandler:
@@ -127,6 +130,9 @@ class CollectorReplayHandler:
         self.healthcheck_port = healthcheck_port
         self.replay_retry = replay_retry
         self.environ = environ
+        # one lock per plain lane, shared by the custom lane beside it: a service never
+        # runs more children than it has plain lanes
+        self._slots = {name: threading.Lock() for name in self.lanes}
 
     def prepare(self, request, lane: str, workdir: str) -> Prepared:
         """Find the interface and copy the configuration of the service
@@ -137,10 +143,14 @@ class CollectorReplayHandler:
         """
         part = custom_part(request, lane)
         interface_name = part.interface_name if part else request.interface_name
-        os.makedirs(workdir, exist_ok=True)
-        # never built from the request: operation_id is not a safe file name
-        copy = tempfile.mkdtemp(dir=workdir, prefix="replay-")
+        # a refusal above needs no slot; the record stays RUNNING while this waits
+        slot = self._slots[slot_of(lane)]
+        slot.acquire()  # pylint: disable=consider-using-with
+        copy = None
         try:
+            os.makedirs(workdir, exist_ok=True)
+            # never built from the request: operation_id is not a safe file name
+            copy = tempfile.mkdtemp(dir=workdir, prefix="replay-")
             entry = find_entry(self.store, self.service, interface_name)
             synced = sync_configs(self.store, copy, [self.service])
             if synced.skipped:
@@ -149,12 +159,19 @@ class CollectorReplayHandler:
                     "configuration files the copy skipped: " + ", ".join(synced.skipped)
                 )
         except ReplayNotPossible as error:
-            shutil.rmtree(copy, ignore_errors=True)
+            self._abandon(copy, slot)
             raise EngineReplayNotPossible(str(error)) from error
         except BaseException:
-            shutil.rmtree(copy, ignore_errors=True)
+            self._abandon(copy, slot)
             raise
-        return Prepared(copy, REPLAY_MODULES[entry["class"]], interface_name)
+        return Prepared(copy, REPLAY_MODULES[entry["class"]], interface_name, slot=slot)
+
+    @staticmethod
+    def _abandon(copy: "str | None", slot: "threading.Lock") -> None:
+        """Remove a copy and free the slot of a `prepare` that failed"""
+        if copy:
+            shutil.rmtree(copy, ignore_errors=True)
+        slot.release()
 
     def command(self, prepared: Prepared, request, lane: str):
         """The collector in replay mode on the copy, and its environment"""
@@ -173,8 +190,11 @@ class CollectorReplayHandler:
         )
 
     def cleanup(self, prepared: Prepared) -> None:
-        """Remove the copy of the configuration"""
+        """Remove the copy of the configuration and free the slot"""
         shutil.rmtree(prepared.copy, ignore_errors=True)
+        slot, prepared.slot = prepared.slot, None
+        if slot is not None:
+            slot.release()
 
     @staticmethod
     def describe_failure(code: int, tail: str) -> str:
