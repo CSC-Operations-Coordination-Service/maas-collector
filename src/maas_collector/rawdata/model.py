@@ -59,6 +59,10 @@ class ActionIterator:
 
         self.unmodified_ids = []
 
+        # (identifier, stored index) of the documents found unchanged, next to
+        # unmodified_ids: the transfer requests of a replay name them too
+        self.unmodified_documents = []
+
         self.has_partial = False
 
         # handle metadata
@@ -161,6 +165,8 @@ class ActionIterator:
                 self.logger.debug("No need to update %s", document_id)
 
                 self.unmodified_ids.append(document_id)
+
+                self.unmodified_documents.append((document_id, document.meta.index))
 
                 if not self.force_update:
                     document_dict = None
