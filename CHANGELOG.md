@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Satellite unavailability reports
+
+- `SatUnavailabilityExtractor` is removed: the `REP__SUP__` reports are extracted with
+  the `XMLExtractor`, the header and report fields anchored on the root with
+  `root_path`. It read the subsystem text from `<Comment>` only, so the reports of the
+  new "Unavailability Tool" format, where it is `<Description>`, had no comment. The
+  extractor args read both formats, and also extract the file header, the identifier,
+  the status and the category of the new one: see `SATU_EXTRACTOR_ARGS` in
+  `tests/test_extractor_satu.py`. `start_time` and `end_time` keep their `UTC=` prefix,
+  so the documents keep their ids.
+- **Before upgrading**, switch the `Satellite-Unavailability` collector to these args
+  and add the new fields to the `SatUnavailabilityProduct` model: a configuration still
+  naming `SatUnavailabilityExtractor` no longer loads. The `XMLExtractor` has read
+  `root_path` since 3.12.0, so the configuration can move first.
+
 ## Version 3.13.0
 
 ### Operator image
