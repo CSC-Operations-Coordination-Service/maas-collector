@@ -17,6 +17,14 @@
   naming `SatUnavailabilityExtractor` no longer loads. The `XMLExtractor` has read
   `root_path` since 3.12.0, so the configuration can move first.
 
+### Named backups
+
+- A configuration file may hold `backups`, one definition per file
+  (`backups/<name>.json`): a name, a type (`BackupS3` or `BackupLocal`), a directory,
+  the S3 buckets, endpoint, region and signature version, and the name of the
+  credential entry holding the S3 keys. The rules are in `docs/backup.md` and checked
+  by `maas_collector.backup.named`.
+
 ## Version 3.13.0
 
 ### Operator image

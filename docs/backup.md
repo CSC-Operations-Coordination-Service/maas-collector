@@ -84,6 +84,48 @@ Not implemented: instanciating it raises `NotImplementedError`.
 }
 ```
 
+## Named backups
+
+A backup can be defined once, by a name, and shared by several entries. A configuration
+file holds a `backups` key, **one file per backup**: `backups/<name>.json`, whose content
+is `{"backups": [definition]}`, tagged with every service that may use it.
+
+```json
+{
+    "backups": [
+        {
+            "name": "archive-a",
+            "description": "the local archive",
+            "type": "BackupLocal",
+            "directory": "/data/archive-a",
+            "calendar_tree": true
+        }
+    ]
+}
+```
+
+| key | type | description |
+| --- | --- | --- |
+| `name` | string | `[a-z0-9][a-z0-9-]*`, at most 64 characters, unique among the files a service loads |
+| `description` | string | optional |
+| `type` | string | `BackupS3` or `BackupLocal` |
+| `directory` | string | mandatory; for `BackupLocal` an absolute path in the container, without `..` |
+| `calendar_tree` | boolean | default `false` |
+| `enable_gzip` | boolean | default `false` |
+| `report_model` | string or null | collector file backups only, see "Backup reports" |
+| `buckets` | list of strings | S3 only, mandatory for S3; several buckets are mirrors |
+| `s3_endpoint_url`, `s3_region`, `s3_signature_version` | string or null | S3 only |
+| `credentials` | string | S3 only, mandatory for S3: the name of a credential entry, which starts with `backup-` |
+
+- **Several buckets are mirrors.** Every file is written to every bucket: adding a
+  bucket duplicates every new write, it does not add capacity.
+- **A filesystem `directory` is an absolute path in the container.**
+- **No secret in a backup block**, named or inline: `s3_access_key` and
+  `s3_secret_key` are refused. They live in the credential entry named by
+  `credentials`.
+
+The rules are checked by `maas_collector.backup.named`.
+
 ## Backup reports
 
 A transfer that is not reported is invisible: a failed upload is logged as
