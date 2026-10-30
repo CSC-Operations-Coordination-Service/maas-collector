@@ -98,8 +98,8 @@ the key `maas.operator.<service>.replay-custom.<lane>` and carries the fields be
 counts for the two objects, an empty `configuration` does not):
 
 ```json
-{"operation_id": "...", "interface_name": "PRIP_S3A_ACRI@custom",
- "interface": "PRIP_S3A_ACRI",
+{"operation_id": "...", "interface_name": "ITF_A@custom",
+ "interface": "ITF_A",
  "start_date": "2026-10-01T00:00:00Z", "end_date": "2026-10-02T00:00:00Z",
  "requested_by": "bob", "lane": "short",
  "overrides": {"download_file_pattern": ["*.EOF*"]}, "configuration": "",
