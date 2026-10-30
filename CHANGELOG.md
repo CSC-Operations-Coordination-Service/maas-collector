@@ -71,6 +71,11 @@
 - The filesystem backup no longer creates its `directory`: when it does not exist, the
   transfer is a `KO` report, so an unmounted path does not fill the disk of the
   container. Create the directory, or mount it, before upgrading.
+- A replay exits with status 74 when files could not be backed up to every destination
+  (a failed transfer, or the "Cannot backup" path), after collecting everything it
+  could, and prints `backup failed: <count> files to <backup>` as its last line; status
+  1 still wins when an interface exhausted its retries. The operator worker reports
+  `N files could not be backed up to <backup>`. Live mode is unchanged.
 - `CollectorBackupS3Configuration` marks `s3_access_key` and `s3_secret_key` as
   sensitive and masks them in its representation.
 

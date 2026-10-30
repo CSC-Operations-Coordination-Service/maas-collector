@@ -108,7 +108,9 @@ the request, is updated by id; the worker never creates a record:
 - `DONE` with `exit_code` 0, or `FAILED` with the exit code and the last lines. The
   child exits 1 when an interface exhausted its retries, and also when it refuses
   the replay, for an interface disabled or missing in its copy, or a jira one
-  without `end_point`;
+  without `end_point`. It exits 74 when files could not be backed up, and the record
+  says `N files could not be backed up to <backup>` (found in the last line the child
+  printed, `backup failed: N files to <backup>`, even when other output follows it);
 - `FAILED` with the reason, and no child run, when the interface is missing,
   disabled, deleted, of another service or of a class that cannot be replayed, or
   when the copy skipped configuration files of the service (bad paths in the index),

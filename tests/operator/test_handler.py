@@ -18,6 +18,7 @@ from maas_engine.replay.request import ReplayRequest
 
 from fakeopensearch import add_config_document
 
+from maas_collector.rawdata.collector.filecollector import BACKUP_FAILED_EXIT_CODE
 from maas_collector.rawdata.configstore import ConfigStore
 from maas_collector.rawdata.operator import handler as handler_module
 from maas_collector.rawdata.operator.handler import CollectorReplayHandler
@@ -279,3 +280,34 @@ def test_replay_the_child_refuses_records_failed_with_exit_code_1(
     assert recorder.calls == [("op1", RUNNING), ("op1", FAILED, 1)]
     assert "an interface failed during the replay" in recorder.details
     assert "Interface ITF_A is disabled" in recorder.details
+
+
+def test_describe_failure_names_the_count_and_the_backup():
+    text = CollectorReplayHandler.describe_failure(
+        BACKUP_FAILED_EXIT_CODE, "collected\nbackup failed: 3 files to archive-a"
+    )
+
+    assert text.startswith("3 files could not be backed up to archive-a\n")
+    assert "collected" in text
+
+
+def test_describe_failure_finds_the_line_among_later_output():
+    # Review Focus 3
+    tail = "backup failed: 3 files to archive-a\nINFO exiting\nWARNING closing connection"
+
+    assert CollectorReplayHandler.describe_failure(
+        BACKUP_FAILED_EXIT_CODE, tail
+    ).startswith("3 files could not be backed up to archive-a")
+
+
+def test_describe_failure_without_the_line_falls_back():
+    assert "files could not be backed up" in CollectorReplayHandler.describe_failure(
+        BACKUP_FAILED_EXIT_CODE, "boom"
+    )
+
+
+def test_describe_failure_keeps_the_other_codes():
+    assert "an interface failed during the replay" in (
+        CollectorReplayHandler.describe_failure(1, "tail")
+    )
+    assert "exit code 9" in CollectorReplayHandler.describe_failure(9, "tail")

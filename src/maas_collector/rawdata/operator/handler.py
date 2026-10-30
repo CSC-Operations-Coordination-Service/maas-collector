@@ -17,7 +17,11 @@ from dataclasses import dataclass
 
 from maas_engine.replay import ReplayNotPossible as EngineReplayNotPossible
 
-from maas_collector.rawdata.collector.filecollector import REPLAY_FAILED_EXIT_CODE
+from maas_collector.rawdata.collector.filecollector import (
+    BACKUP_FAILED_EXIT_CODE,
+    BACKUP_FAILURE_LINE,
+    REPLAY_FAILED_EXIT_CODE,
+)
 from maas_collector.rawdata.configstore import ConfigStore
 from maas_collector.rawdata.configsync import sync_configs
 from maas_collector.rawdata.operator.replay import (
@@ -108,6 +112,17 @@ class CollectorReplayHandler:
         """Why a replay failed: the collector's own exit code says what it found"""
         if code == REPLAY_FAILED_EXIT_CODE:
             reason = "an interface failed during the replay"
+        elif code == BACKUP_FAILED_EXIT_CODE:
+            reason = "files could not be backed up"
+            # the line is the last one the collector printed, other output may follow
+            for line in reversed(tail.splitlines()):
+                found = BACKUP_FAILURE_LINE.fullmatch(line.strip())
+                if found:
+                    reason = (
+                        f"{found['count']} files could not be backed up"
+                        f" to {found['backup']}"
+                    )
+                    break
         else:
             reason = f"exit code {code}"
         return f"{reason}\n{tail}"

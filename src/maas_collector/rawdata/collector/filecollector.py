@@ -8,6 +8,7 @@ import fnmatch
 import gc
 import logging
 import os
+import re
 import signal
 import time
 import traceback
@@ -19,6 +20,7 @@ from urllib.parse import urlparse
 from functools import cached_property
 
 from maas_collector.backup import instanciate_collector_backup
+from maas_collector.backup.backup import OK
 from maas_collector.backup.backup import CollectorBackupConfiguration
 from maas_collector.backup.named import (
     SECRET_FIELDS,
@@ -60,6 +62,18 @@ CONFIG_CHANGED_EXIT_CODE = 75
 
 # exit code of a replay CLI when an interface exhausted its retries
 REPLAY_FAILED_EXIT_CODE = 1
+
+# exit code of a replay CLI when files could not be backed up: distinct from
+# REPLAY_FAILED_EXIT_CODE and from CONFIG_CHANGED_EXIT_CODE
+BACKUP_FAILED_EXIT_CODE = 74
+
+# last line of a replay CLI that exits with BACKUP_FAILED_EXIT_CODE, which the
+# operator worker parses to tell the operator what could not be backed up
+BACKUP_FAILURE_FORMAT = "backup failed: {count} files to {backup}"
+
+BACKUP_FAILURE_LINE = re.compile(
+    r"backup failed: (?P<count>\d+) files to (?P<backup>.+)"
+)
 
 
 # collector classes need many attributes
@@ -347,6 +361,9 @@ class FileCollector(CredentialMixin):
 
         # interface names whose replay exhausted its retries
         self.replay_failures: list[str] = []
+
+        # backup label -> files that could not be backed up, in replay mode only
+        self.backup_failures: dict[str, int] = {}
 
         self.stats = CollectorStats(entities={})
 
@@ -764,6 +781,39 @@ class FileCollector(CredentialMixin):
             self.action_iterator_errors = self._action_iterator.action_iterator_errors
             self._action_iterator = None
 
+    def is_incomplete(self, batch: list) -> bool:
+        """True when the reports of one file show it was not backed up, with an OK
+        report, to every destination of the backup
+
+        Args:
+            batch (list[BackupReport]): reports of the file
+        """
+        return len(batch) != len(self._backup.destinations) or any(
+            report.status != OK for report in batch
+        )
+
+    def count_backup_failure(self, config) -> None:
+        """count a file that could not be backed up, under the name of its backup
+
+        Args:
+            config (FileCollectorConfiguration): ingestion config
+        """
+        label = config.backup_name or "(inline)"
+
+        self.backup_failures[label] = self.backup_failures.get(label, 0) + 1
+
+    def backup_failure_line(self) -> str:
+        """the last line of a replay that exits with BACKUP_FAILED_EXIT_CODE
+
+        Returns:
+            str: BACKUP_FAILURE_FORMAT with the number of files and the sorted names
+                of the backups
+        """
+        return BACKUP_FAILURE_FORMAT.format(
+            count=sum(self.backup_failures.values()),
+            backup=", ".join(sorted(self.backup_failures)),
+        )
+
     def build_backup_block(self, config) -> dict:
         """the block of the backup object: a copy of the backup of the configuration
         with the name of the backup and the S3 keys of its credential entry
@@ -813,23 +863,34 @@ class FileCollector(CredentialMixin):
         """
         reports = []
 
+        # the file, or its sidecar, was not backed up to every destination
+        failed = False
+
         try:
             self._backup = instanciate_collector_backup(self.build_backup_block(config))
 
-            reports.extend(self._backup.backup_file(config, path))
+            batch = self._backup.backup_file(config, path)
+            reports.extend(batch)
+            failed = self.is_incomplete(batch)
 
             # handle meta
             if IngestionMeta.has_meta_file(path):
-                reports.extend(
-                    self._backup.backup_file(config, IngestionMeta.get_meta_path(path))
+                batch = self._backup.backup_file(
+                    config, IngestionMeta.get_meta_path(path)
                 )
+                reports.extend(batch)
+                failed = failed or self.is_incomplete(batch)
 
         # catch broad exception to not break the ingestion loop
         # pylint: disable=W0703
         except Exception as error:
+            failed = True
             self.logger.error("Cannot backup %s", path)
             self.logger.exception(error)
         # pylint: enable=W0703
+
+        if failed and self.args.replay:
+            self.count_backup_failure(config)
 
         if not reports or config.backup_report_model is None:
             return

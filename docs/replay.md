@@ -57,6 +57,14 @@ when at least one interface exhausted its retries (`Failed replay for ...` is lo
 or when the replay is refused before collecting anything: an interface disabled,
 unknown, or a jira one without `end_point` (the error is logged).
 
+It exits with status 74 when files could not be backed up: a file whose backup did
+not end with an `OK` report for every destination (the "Cannot backup" path
+included) is counted, the replay collects everything it can, then exits and prints,
+as its last line, `backup failed: <count> files to <backup name>` (the names of the
+backups, sorted, when there are several; `(inline)` for a backup block that has no
+name). Status 1 wins when both happened, and the line is printed anyway. A live
+collector is not concerned: it logs the failed backups and goes on.
+
 ## Error messages
 
 ### Unknown interface
