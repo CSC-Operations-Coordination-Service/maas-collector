@@ -57,6 +57,17 @@ class S3CollectorConfiguration(FileCollectorConfiguration):
 
     s3_region: str = None
 
+    # Only list the objects under this key prefix (for example "to_ingest/").
+    # Empty means the whole bucket, as before.
+    s3_prefix: str = ""
+
+    # Where an object goes once it has been ingested, as a key prefix. "{date}"
+    # is replaced by the UTC day (YYYY-MM-DD), for example "ingested/{date}/".
+    # Empty keeps the object in place. When set, the object is moved (copy then
+    # delete, so only after the documents are written) and the journal date
+    # filter is not applied: everything under s3_prefix is still to be ingested.
+    s3_move_to: str = ""
+
     refresh_interval: int = 0
 
     parent_file_pattern: str = None
@@ -92,6 +103,56 @@ class S3Configuration:
     keep_files: bool = False
 
     # TODO consumme_files ?
+
+
+def build_list_kwargs(
+    config: S3CollectorConfiguration, bucket: str, start_after: str = None
+) -> dict:
+    """Arguments of list_objects_v2 for one page of a bucket
+
+    Args:
+        config (S3CollectorConfiguration): configuration of the interface
+        bucket (str): bucket to list
+        start_after (str, optional): last key of the previous page.
+
+    Returns:
+        dict: keyword arguments for boto3 list_objects_v2
+    """
+    kwargs = {"Bucket": bucket, "MaxKeys": config.s3_max_keys}
+    if config.s3_prefix:
+        kwargs["Prefix"] = config.s3_prefix
+    if start_after:
+        kwargs["StartAfter"] = start_after
+    return kwargs
+
+
+def moved_key(config: S3CollectorConfiguration, key: str, now: datetime.datetime):
+    """Destination key of an ingested object, or None when it stays in place
+
+    The part of the key under s3_prefix is kept, so a sub folder (an interface
+    name for example) survives the move.
+    """
+    if not config.s3_move_to:
+        return None
+    relative = key[len(config.s3_prefix) :] if key.startswith(config.s3_prefix) else key
+    return (
+        config.s3_move_to.replace("{date}", now.strftime("%Y-%m-%d"))
+        + relative.lstrip("/")
+    )
+
+
+def move_object(client, bucket: str, key: str, destination: str):
+    """Move an object inside a bucket: copy it, then delete the source
+
+    S3 has no rename. The delete only happens when the copy worked, so a failure
+    leaves the object under its source key and it is ingested again next time.
+    """
+    client.copy_object(
+        Bucket=bucket,
+        Key=destination,
+        CopySource={"Bucket": bucket, "Key": key},
+    )
+    client.delete_object(Bucket=bucket, Key=key)
 
 
 class S3Collector(FileCollector, HttpMixin):
@@ -353,16 +414,9 @@ class S3Collector(FileCollector, HttpMixin):
                     break
 
                 # Handling iteration
-                if last_item_from_buckets:
-                    response = self.s3_resource.list_objects_v2(
-                        Bucket=bucket,
-                        MaxKeys=config.s3_max_keys,
-                        StartAfter=last_item_from_buckets,
-                    )
-                else:
-                    response = self.s3_resource.list_objects_v2(
-                        Bucket=bucket, MaxKeys=config.s3_max_keys
-                    )
+                response = self.s3_resource.list_objects_v2(
+                    **build_list_kwargs(config, bucket, last_item_from_buckets)
+                )
 
                 # Less key count than max keys
                 if response["KeyCount"] < config.s3_max_keys:
@@ -378,7 +432,14 @@ class S3Collector(FileCollector, HttpMixin):
                         self.logger.debug(
                             "File Name: %s, Last Modified: %s", file_name, last_modified
                         )
-                        if not (__iter_start_date < last_modified <= __iter_end_date):
+                        if config.s3_prefix and obj["Key"] == config.s3_prefix:
+                            # the "folder" placeholder some S3 services list
+                            last_item_from_buckets = obj["Key"]
+                            continue
+
+                        if not config.s3_move_to and not (
+                            __iter_start_date < last_modified <= __iter_end_date
+                        ):
                             self.logger.debug(
                                 "This file has been already process or will be in the futur %s %s",
                                 file_name,
@@ -456,6 +517,23 @@ class S3Collector(FileCollector, HttpMixin):
                                     )
 
                                 self.on_ingest_success(filepath, extract_config)
+
+                                destination = moved_key(
+                                    config,
+                                    file_name,
+                                    datetime.datetime.now(tz=datetime.UTC),
+                                )
+                                if destination:
+                                    move_object(
+                                        self.s3_resource, bucket, file_name, destination
+                                    )
+                                    self.logger.info(
+                                        "Moved %s to %s", file_name, destination
+                                    )
+                                # one configuration ingests the file, the object
+                                # is gone: do not try the next ones
+                                if destination:
+                                    break
                         # After ingestion keep this id in collector ?
 
                         #

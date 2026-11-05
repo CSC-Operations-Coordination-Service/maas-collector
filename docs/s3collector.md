@@ -22,6 +22,30 @@ common Options of a collector (es_url, working_dir ....) see common parser.md an
 | ----------------- | ---------------------------------------- |
 | class             | shall be S3CollectorConfiguration------- |
 
+## Prefix and move after ingest
+
+Two optional keys of the collector credential configuration turn a bucket into a
+drop folder:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `s3_prefix` | `""` | List only the objects under this key prefix, for example `to_ingest/`. Empty lists the whole bucket. |
+| `s3_move_to` | `""` | Key prefix an object is moved to once it is ingested. `{date}` is the UTC day (`YYYY-MM-DD`), for example `ingested/{date}/`. Empty leaves the object in place. |
+
+With `s3_move_to` set:
+
+- the object is **moved** (copy, then delete) after its documents are written. If the
+  copy fails the object stays where it was and is ingested again on the next loop;
+- the journal date filter is not applied: everything under `s3_prefix` is still to be
+  ingested, whatever its `LastModified`;
+- the first configuration that matches the file name ingests it, the other ones are not
+  tried (the object is gone);
+- the part of the key under `s3_prefix` is kept, so `to_ingest/AUXIP/a.tgz` goes to
+  `ingested/2026-10-28/AUXIP/a.tgz`.
+
+A prefix that is not scanned (for example `buffer/`) holds files that wait for an
+operator to choose them.
+
 ## Sample collector credential configuration
 
 ```json

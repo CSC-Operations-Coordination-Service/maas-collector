@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### S3 collector
+
+- `s3_prefix` limits the listing to a key prefix, and `s3_move_to` moves an object
+  (`ingested/{date}/` for example) once it is ingested. See
+  [the S3 collector](s3collector.md#prefix-and-move-after-ingest).
+
 ## Version 3.13.0
 
 ### Telemetry
