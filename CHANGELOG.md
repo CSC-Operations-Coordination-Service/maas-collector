@@ -1,5 +1,21 @@
 # Changelog
 
+## Version 3.14.1
+
+Released 2026-11-05.
+
+### HTTP collectors
+
+- A query answered 429 (rate limit, like the CDSE WAF) or 503 no longer fails the
+  interface at once: it is sent again up to 5 times, 0, 10, 20, 40 then 80 s apart, or
+  after the `Retry-After` of the answer. Only GET is retried; timeouts, connection
+  errors and other statuses still fail at once. The tuning is
+  `HttpConfiguration.status_retries` and `status_backoff_factor`.
+- A failing replay waits 10 s before its first retry, then twice as long at each
+  retry, up to 120 s, instead of 10 s every time. With the default `--replay-retry`
+  of 1024, an interface that never recovers now retries for about 34 hours instead of
+  about 3: give a lower `--replay-retry` to give up sooner (the operator passes 3).
+
 ## Version 3.14.0
 
 Released 2026-10-30. Upgrade note: see "Satellite unavailability reports" before moving a collector that loads `SatUnavailabilityExtractor`.
