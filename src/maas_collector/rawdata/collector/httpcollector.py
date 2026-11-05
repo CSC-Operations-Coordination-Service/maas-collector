@@ -84,6 +84,20 @@ class HttpCollectorConfiguration(FileCollectorConfiguration):
         return self.protocol_version
 
 
+# answers meaning "come back later": a rate limit (429) or an overloaded server (503)
+RETRIED_STATUSES = (429, 503)
+
+# first wait before a replay retries an interface, doubled at each retry
+REPLAY_RETRY_WAIT = 10
+
+REPLAY_RETRY_MAX_WAIT = 120
+
+
+def replay_retry_wait(nb_retries: int) -> int:
+    """seconds to wait before the nb_retries-th retry (from 1) of a replay"""
+    return min(REPLAY_RETRY_WAIT * 2 ** (nb_retries - 1), REPLAY_RETRY_MAX_WAIT)
+
+
 @dataclass
 class HttpConfiguration:
     """Store Http configuration vars"""
@@ -91,6 +105,30 @@ class HttpConfiguration:
     timeout: int = 120
 
     keep_files: bool = False
+
+    # times a GET answered by one of RETRIED_STATUSES is sent again
+    status_retries: int = 5
+
+    # waits 0, 2*f, 4*f, 8*f... seconds between those retries (capped at 120 s by
+    # urllib3), or what the Retry-After header of the answer says
+    status_backoff_factor: float = 5
+
+    def status_retry(self) -> Retry:
+        """urllib3 retry policy of the collect sessions: only RETRIED_STATUSES on
+        GET; connection errors and timeouts still fail at once"""
+        return Retry(
+            total=self.status_retries,
+            connect=0,
+            read=0,
+            other=0,
+            status=self.status_retries,
+            status_forcelist=RETRIED_STATUSES,
+            allowed_methods=frozenset(["GET", "HEAD"]),
+            backoff_factor=self.status_backoff_factor,
+            respect_retry_after_header=True,
+            # the last answer is returned so callers log its status and body
+            raise_on_status=False,
+        )
 
 
 class HttpCollector(FileCollector, HttpMixin):
@@ -243,8 +281,9 @@ class HttpCollector(FileCollector, HttpMixin):
                         break
 
                     nb_retries += 1
-                    self.logger.info("Waiting 10s before retrying the replay")
-                    sleep(10)
+                    wait = replay_retry_wait(nb_retries)
+                    self.logger.info("Waiting %ds before retrying the replay", wait)
+                    sleep(wait)
 
                     # a replay runs within one loop: pick up rotated credentials
                     self.refresh_credentials()
@@ -338,6 +377,12 @@ class HttpCollector(FileCollector, HttpMixin):
         """
 
         with self.create_http_session(config) as http_session:
+            # a rate limited query waits and is sent again instead of failing the
+            # whole interface
+            adapter = HTTPAdapter(max_retries=self.http_config.status_retry())
+            http_session.mount("http://", adapter)
+            http_session.mount("https://", adapter)
+
             http_implementation = self.build_query_implementation(
                 config, http_session, start_date, end_date, journal
             )
