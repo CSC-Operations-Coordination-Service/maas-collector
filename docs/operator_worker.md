@@ -59,7 +59,7 @@ Its own options:
 | `--operator-healthcheck-port`     | `OPERATOR_HEALTHCHECK_PORT`     | 18081                   | health check port of the short lane collector, +1 for long |
 | `--operator-workdir`              | `OPERATOR_WORKDIR`              | system temp folder      | folder of the configuration copies and check payloads      |
 | `--operator-check-timeout`        | `OPERATOR_CHECK_TIMEOUT`        | 20                      | seconds a check may wait for the interface                 |
-| `--operator-replay-retry`         | `OPERATOR_REPLAY_RETRY`         | 3                       | retries of a failing odata replay, 10 s apart              |
+| `--operator-replay-retry`         | `OPERATOR_REPLAY_RETRY`         | 3                       | retries of a failing odata replay, 10 s apart then doubling |
 | `--operator-single-lane`          | `OPERATOR_SINGLE_LANE`          | false                   | `true` for one lane that runs every replay, one at a time  |
 
 A long replay may run `max(short timeout, days of its window × long timeout per
@@ -67,9 +67,12 @@ day)` seconds. The timeout is the one of the lane, that is of the queue the requ
 came from, whatever its `lane` field says.
 
 `OPERATOR_REPLAY_RETRY` is given to the child as `--replay-retry`: an odata interface
-that keeps failing gives up after that many retries, 10 s apart, instead of the 1024
-of the collector, so that a dead interface does not hold its lane for hours. A jira
-replay makes one attempt whatever the setting.
+that keeps failing gives up after that many retries, instead of the 1024 of the
+collector, so that a dead interface does not hold its lane for hours. The first retry
+waits 10 s, each next one twice as long, up to 120 s. Within an attempt, a query
+answered 429 (rate limit) or 503 is itself sent again up to 5 times, 0, 10, 20, 40 then
+80 s apart, or after the `Retry-After` of the answer. A jira replay makes one attempt
+whatever the setting.
 
 ## Queues
 
