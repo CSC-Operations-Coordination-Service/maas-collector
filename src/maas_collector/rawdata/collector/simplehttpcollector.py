@@ -11,6 +11,9 @@ from maas_collector.rawdata.collector.httpcollector import (
 
 from maas_collector.rawdata.collector.httpmixin import HttpMixin
 
+from maas_collector.rawdata.collector.simplehttp.links_impl import (
+    SimpleHttpLinksImplementation,
+)
 from maas_collector.rawdata.collector.simplehttp.v1_impl import (
     SimpleHttpQueryV1Implementation,
 )
@@ -46,6 +49,10 @@ class SimpleHttpCollectorConfiguration(HttpCollectorConfiguration):
 
     http_rest_uri: str = ""
 
+    # protocol_version "links": regular expression of the links to collect, with a
+    # "name" and a "date" (YYYYMMDD) group
+    link_pattern: str = ""
+
     auth_method: str = "SessionAuth"
 
     # Used for the last_date in journal
@@ -63,7 +70,10 @@ class SimpleHttpCollector(HttpCollector, HttpMixin):
 
     CONFIG_CLASS = SimpleHttpCollectorConfiguration
 
-    IMPL_DIR = {"v1": SimpleHttpQueryV1Implementation}
+    IMPL_DIR = {
+        "v1": SimpleHttpQueryV1Implementation,
+        "links": SimpleHttpLinksImplementation,
+    }
 
     @classmethod
     def build_probe_query(cls, config: SimpleHttpCollectorConfiguration):
