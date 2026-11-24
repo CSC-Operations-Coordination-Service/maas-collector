@@ -85,7 +85,9 @@ class ActionIterator:
             # nothing to do
             return
 
-        key = (indexname, identifier)
+        # by identifier only: a model writing to an alias is answered with the name of
+        # the index behind it
+        key = identifier
 
         if key not in self.pending_callbacks:
             self.logger.warning("iter_callback not found for %s ", key)
@@ -178,9 +180,9 @@ class ActionIterator:
                 )
 
         if self.iter_callback:
-            self.pending_callbacks[
-                (document.partition_index_name, document.meta.id)
-            ] = lambda: self.iter_callback(document)
+            self.pending_callbacks[document.meta.id] = lambda: self.iter_callback(
+                document
+            )
 
         return document_dict
 

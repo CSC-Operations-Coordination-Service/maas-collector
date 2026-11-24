@@ -196,6 +196,10 @@ class FileCollectorConfiguration:
     # process ventilate its messages over several exchanges.
     exchange_name: str = ""
 
+    # index of the collector journal entry of this configuration, so that a project
+    # may keep its own journal. Empty: maas-collector-journal
+    journal_index: str = ""
+
     no_probe: bool = False
 
     # False keeps the entry in the configuration but out of every collector run

@@ -95,6 +95,11 @@ class CollectorJournal:
     def id(self):
         return self.config.interface_name
 
+    @property
+    def index(self):
+        """journal index: the configuration's journal_index, else the document's"""
+        return getattr(self.config, "journal_index", None) or self.DOCUMENT_CLASS._index._name
+
     @last_date.setter
     def last_date(self, last_date):
         """set last meaningful date (like production / publication)"""
@@ -166,7 +171,7 @@ class CollectorJournal:
                 "Try accessing collector journal entry for %s",
                 self.id,
             )
-            self.document = self.DOCUMENT_CLASS.get(self.id)
+            self.document = self.DOCUMENT_CLASS.get(self.id, index=self.index)
 
         except opensearchpy.exceptions.NotFoundError:
             self.logger.info(
@@ -182,6 +187,8 @@ class CollectorJournal:
         self.document = self.DOCUMENT_CLASS()
         self.document.key = self.id
         self.document.meta.id = self.id
+        # every later save goes to the index in meta
+        self.document.meta.index = self.index
 
     def tick(self):
         """
@@ -304,6 +311,12 @@ class CollectorReplayJournal(CollectorJournal):
         self.is_a_replay_journal = True
         self.suffix = suffix
         self.nb_of_retry = nb_of_retry
+
+    @property
+    def index(self):
+        # ponytail: replays keep maas-collector-replay-journal whatever journal_index
+        # says; add a replay setting when a project needs its own
+        return self.DOCUMENT_CLASS._index._name
 
     @property
     def id(self):

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### HTTP collectors
+
+- `SimpleHttpCollector` has a `"links"` mode (`"protocol_version": "links"`): it reads
+  the page at `product_url` and collects each file it links to. `link_pattern` is a
+  regular expression of the links, with a `name` group (the file name) and a `date`
+  group (YYYYMMDD): a run collects the files dated from 7 days before its last collect,
+  and a replay those of its window. Used for the ESA Sentinel-1/2 acquisition plans.
+
+### Journal
+
+- The journal of a model writing to an alias now gets its last date: the documents
+  were looked up under the alias name while OpenSearch answers with the index behind
+  it, so each one logged `iter_callback not found` and the next run started from the
+  refresh interval again.
+- `journal_index` sets the index of a configuration's journal entries (default
+  `maas-collector-journal`), so that a project can keep its own journal. Replays keep
+  `maas-collector-replay-journal`.
+
 ## Version 3.14.1
 
 Released 2026-11-05.
