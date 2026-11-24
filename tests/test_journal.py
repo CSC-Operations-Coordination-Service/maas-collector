@@ -45,3 +45,17 @@ def test_replay_journal():
     journal = CollectorReplayJournal(config, start_date, end_date, suffix="scissors")
 
     assert journal.id == "face_palm_scissors"
+
+
+def test_journal_index():
+    config = ODataCollectorConfiguration(**CONF3)
+
+    assert CollectorJournal(config).index == "maas-collector-journal"
+
+    config.journal_index = "senti-collector-journal"
+
+    assert CollectorJournal(config).index == "senti-collector-journal"
+
+    # replays keep their own index
+    replay = CollectorReplayJournal(config, timedelta(days=1), timedelta(days=2))
+    assert replay.index == "maas-collector-replay-journal"

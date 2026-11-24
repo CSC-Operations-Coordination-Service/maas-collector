@@ -16,6 +16,9 @@
   were looked up under the alias name while OpenSearch answers with the index behind
   it, so each one logged `iter_callback not found` and the next run started from the
   refresh interval again.
+- `journal_index` sets the index of a configuration's journal entries (default
+  `maas-collector-journal`), so that a project can keep its own journal. Replays keep
+  `maas-collector-replay-journal`.
 
 ## Version 3.14.1
 
