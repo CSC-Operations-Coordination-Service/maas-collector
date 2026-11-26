@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## Version 3.14.2
+
+Released 2026-11-26.
 
 ### Quality disclaimers
 
