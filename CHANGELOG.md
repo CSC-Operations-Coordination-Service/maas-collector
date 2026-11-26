@@ -1,5 +1,29 @@
 # Changelog
 
+## Version 3.14.2
+
+Released 2026-11-26.
+
+### Quality disclaimers
+
+- The PDF parser reads more disclaimers and more of their product names:
+  - the title block is found when the text extraction mixes digits into the logo
+    letters (`S9E2N TINEL-1 Quality Disclaimer`) or puts `No. <n>` on a line before
+    the title. Before, such a PDF was not recognised at all, product list included;
+  - a product name without the `.SAFE` suffix is read, and kept as written: many
+    disclaimers list their products that way;
+  - the Level-0 classes `C` and `N` are read (`S1A_IW_RAW__0CSH_...`), besides `S`
+    and `A`, and so are the ETA products (`S1A_IW_ETA__AXDV_...`, whose
+    `processing_level` is `None`) and the polarisations `HH`, `HV`, `VH` and `VV`;
+  - a product listed in a table row, its name then other columns, is read from the
+    first word of the line.
+- Over the 424 disclaimers SAR-MPC published as PDF on 2026-11-26, the parser now
+  recognises all 424 instead of 389, and reads 129,673 product names in 324 of them
+  instead of 96,438 in 218. It still skips the wildcard patterns
+  (`S1A_EW_*SDH_..._*`, 25 disclaimers) and the `_CARD_BS` names.
+- A disclaimer collected before this version keeps its old fields until it is
+  collected again: the collector does not collect an unchanged disclaimer twice.
+
 ## Version 3.14.1
 
 Released 2026-11-05.
