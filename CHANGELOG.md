@@ -1,5 +1,18 @@
 # Changelog
 
+## Version 3.14.3
+
+Released 2026-11-26. This entry and the fallback and SonarQube versions came after the
+tag, which was pushed without its release commit.
+
+### Quality disclaimers
+
+- The PDF parser frees each page once read. pdfplumber kept every parsed page until the
+  file was closed: 2.4 GB for the 304 pages of disclaimer #4, and the disclaimer
+  collector was OOM-killed at its 1 GiB limit on every pass (prod, 2026-11-26). Over the
+  427 PDFs, the peak is now 65 MB or less, except #2 (about 780 MB, one page of 96,450
+  vector curves).
+
 ## Version 3.14.2
 
 Released 2026-11-26.
