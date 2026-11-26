@@ -144,3 +144,48 @@ def test_names_in_table_rows():
         "S1A_IW_SLC__1SDV_20150323T171452_20150323T171518_005162_00681A_25C0",
         "S1A_IW_SLC__1SDV_20150323T171427_20150323T171454_005162_00681A_757F",
     ]
+
+
+class _FakePage:
+    rects: list = []
+    lines: list = []
+    curves: list = []
+
+    def __init__(self, closed):
+        self._closed = closed
+
+    def extract_text(self):
+        return "text"
+
+    def extract_words(self, *_, **__):
+        return []
+
+    def close(self):
+        self._closed.append(self)
+
+
+class _FakePdf:
+    def __init__(self, closed, count):
+        self.pages = [_FakePage(closed) for _ in range(count)]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def test_every_page_is_closed(monkeypatch):
+    # pdfplumber keeps each parsed page until the file is closed: 2.4 GB for the
+    # 304 pages of #4, an OOM kill at the collector's 1 GiB limit (2026-11-26)
+    from maas_collector.rawdata.collector.disclaimer import pdf_extract
+
+    closed = []
+    fake = type("pdfplumber", (), {"open": staticmethod(lambda _: _FakePdf(closed, 3))})
+    monkeypatch.setattr(pdf_extract, "pdfplumber", fake)
+
+    assert pdf_extract.extract_text("x.pdf") == ["text"] * 3
+    assert len(closed) == 3
+    closed.clear()
+    pdf_extract.extract_checkbox_selections("x.pdf")
+    assert len(closed) == 3

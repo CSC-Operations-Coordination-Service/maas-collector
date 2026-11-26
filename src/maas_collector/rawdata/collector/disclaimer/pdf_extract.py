@@ -42,6 +42,10 @@ def extract_text(path: Path) -> list[str]:
         with pdfplumber.open(path) as pdf:
             for pg in pdf.pages:
                 texts.append(pg.extract_text() or "")
+                # pdfplumber keeps the parsed objects of every page until the file
+                # is closed: about 8 MB a page, 2.4 GB for the 304 pages of #4,
+                # which an OOM kill stopped at the collector's 1 GiB limit.
+                pg.close()
         return texts
 
     if PdfReader is not None:
@@ -187,6 +191,7 @@ def extract_checkbox_selections(path: Path) -> dict | None:
                 groups.setdefault(group, [])
                 if checked and label not in groups[group]:
                     groups[group].append(label)
+            page.close()  # free the page's objects, as in extract_text
     return groups or None
 
 
