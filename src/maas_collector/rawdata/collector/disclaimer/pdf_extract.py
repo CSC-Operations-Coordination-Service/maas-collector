@@ -1,8 +1,10 @@
 """PDF extraction for SAR-MPC Quality Disclaimer documents.
 
 This module is the library form of the standalone ``pdf_extract.py`` tool
-provided by the MPC team: the parsing logic is kept verbatim, only the CLI and
-file-writing helpers were dropped. The collector calls :func:`extract_pdf`,
+provided by the MPC team: the CLI and file-writing helpers were dropped, and the
+parsing was widened where real disclaimers did not match it (the header garbled
+by the text extraction, product names listed without ``.SAFE`` or in table
+rows, more product classes and polarisations). The collector calls :func:`extract_pdf`,
 which returns the PDF metadata together with the structured Quality Disclaimer
 fields for a single downloaded PDF.
 
@@ -192,22 +194,32 @@ def extract_checkbox_selections(path: Path) -> dict | None:
 # Sentinel-1 product naming convention
 # --------------------------------------------------------------------------- #
 # e.g. S1C_IW_GRDH_1SDV_20260625T152305_20260625T152336_008264_01056B_F534_COG.SAFE
+# Many disclaimers list the names without the .SAFE suffix (#33, #54, #150, ...):
+# the suffix is optional, and the name is kept as written (maas-cds matches the
+# extension variants itself). Level-0 products have the classes C (compressed
+# annotations) and N (noise) besides S and A (#343: S1A_IW_RAW__0CSH_...). The
+# ETA (extended timing annotation) products have the level A and the class X
+# (#348: S1A_IW_ETA__AXDV_...). Besides SH, SV, DH and DV, the polarisation can
+# be HH, HV, VH or VV (#46: S1B_IW_RAW__0SVV_...).
 _S1_PRODUCT_RE = re.compile(
     r"^(?P<mission>S1[ABCD])_"
     r"(?P<mode>[A-Z0-9]{2})_"
     r"(?P<ptype>[A-Z_]{3})(?P<resolution>[FHM_])_"
-    r"(?P<level>[0-9])(?P<class>[SA])(?P<polarization>[SD][HV])_"
+    r"(?P<level>[0-9A])(?P<class>[SACNX])(?P<polarization>[SD][HV]|[HV][HV])_"
     r"(?P<start>\d{8}T\d{6})_"
     r"(?P<stop>\d{8}T\d{6})_"
     r"(?P<orbit>\d{6})_"
     r"(?P<datatake>[0-9A-Fa-f]{6})_"
     r"(?P<crc>[0-9A-Fa-f]{4})"
     r"(?:_(?P<cog>COG))?"
-    r"\.SAFE$"
+    r"(?:\.SAFE)?$"
 )
 
 _POL_LABELS = {"SH": "Single pol. H", "SV": "Single pol. V",
-               "DH": "Double pol. H", "DV": "Double pol. V"}
+               "DH": "Double pol. H", "DV": "Double pol. V",
+               # one channel of a dual-pol acquisition
+               "HH": "Partial dual pol. HH", "HV": "Partial dual pol. HV",
+               "VH": "Partial dual pol. VH", "VV": "Partial dual pol. VV"}
 
 # Auxiliary / ADF products, e.g.
 # S1C_AUX_INS_V20241204T000000_G20241204T092730.SAFE
@@ -254,7 +266,8 @@ def parse_sentinel1_product(name: str) -> dict | None:
         "mission": g["mission"].replace("S1", "S-1"),
         "mode": g["mode"],
         "product_type": ptype,
-        "processing_level": int(g["level"]),
+        # None for the ETA products, whose level is "A"
+        "processing_level": int(g["level"]) if g["level"].isdigit() else None,
         "polarization": g["polarization"],
         "polarization_label": _POL_LABELS.get(g["polarization"]),
         "sensing_start": g["start"],
@@ -305,6 +318,20 @@ def _first(text: str, pattern: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+# The title block. The logo letters overlap the page text, so the extraction
+# mixes stray digits into the first letters ("S9E NTINEL-1", "S9E2N TINEL-1"),
+# and puts "No. <n>" on its own line, before or after the title (#215, #236,
+# #300).
+_HEADER_RE = re.compile(
+    r"S[\s\d]*E[\s\d]*N[\s\d]*T[\s\d]*INEL-(?P<mission>\d[A-Z]?)"
+    r".*?Quality Disclaimer(?:\s*No\.?\s*(?P<num>\d+))?",
+    re.IGNORECASE | re.DOTALL,
+)
+_NUMBER_LINE_RE = r"^\s*No\.?\s*(\d+)\s*$"
+# How far into the text the title block can be.
+_HEADER_SPAN = 400
+
+
 def parse_quality_disclaimer(
     full_text: str, checkboxes: dict | None = None
 ) -> dict | None:
@@ -316,18 +343,17 @@ def parse_quality_disclaimer(
 
     Returns None if the document does not look like a Quality Disclaimer.
     """
-    header = re.search(
-        r"S\s*ENTINEL-(?P<mission>\d[A-Z]?).*?Quality Disclaimer\s*No\.?\s*(?P<num>\d+)",
-        full_text,
-        re.IGNORECASE | re.DOTALL,
-    )
+    header = _HEADER_RE.search(full_text)
     if not header:
+        return None
+    number = header.group("num") or _first(full_text[:_HEADER_SPAN], _NUMBER_LINE_RE)
+    if number is None:
         return None
 
     out: dict = {
         "document_type": "Quality Disclaimer",
         "mission": f"Sentinel-{header.group('mission')}",
-        "disclaimer_number": int(header.group("num")),
+        "disclaimer_number": int(number),
         "title": _section(full_text, "Title:", "Description:"),
         "description": _section(full_text, "Description:", "Degradation types:"),
         "degradation_percentage": _first(
@@ -367,7 +393,10 @@ def parse_quality_disclaimer(
     # Impacted products
     products = []
     for line in full_text.splitlines():
-        parsed = parse_sentinel1_product(line)
+        # A product line holds the name alone, or the name then other columns
+        # of a table (#59: name, datatake, orbit, ...): read its first word.
+        words = line.split()
+        parsed = parse_sentinel1_product(words[0]) if words else None
         if parsed:
             products.append(parsed)
     out["impacted_product_names"] = [p["name"] for p in products]
